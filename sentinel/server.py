@@ -1,6 +1,7 @@
 """FastAPI server — browser extension + CLI talk to this."""
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing import Optional
 from . import (
@@ -8,6 +9,7 @@ from . import (
     stats as stats_mod, persistence,
     partners as partners_mod, penalties as penalties_mod,
     query as query_mod, importer as importer_mod, templates as templates_mod,
+    dashboard as dashboard_mod,
 )
 import asyncio
 
@@ -36,6 +38,12 @@ class RuleCreate(BaseModel):
 class ConfigSet(BaseModel):
     key: str
     value: str
+
+
+@app.get("/", response_class=HTMLResponse)
+def dashboard_page():
+    """Serve the single-page dashboard."""
+    return HTMLResponse(content=dashboard_mod.get_dashboard_html())
 
 
 @app.on_event("startup")
