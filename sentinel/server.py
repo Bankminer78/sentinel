@@ -39,6 +39,26 @@ from . import (
     motivation as motivation_mod,
     nlp as nlp_mod,
     screenshots as screenshots_mod,
+    environment as environment_mod,
+    coach as coach_mod,
+    checkins as checkins_mod,
+    rituals as rituals_mod,
+    triggers as triggers_mod,
+    patterns as patterns_mod,
+    tags as tags_mod,
+    undo as undo_mod,
+    timeline as timeline_mod,
+    profile as profile_mod,
+    forecasting as forecasting_mod,
+    alerts as alerts_mod,
+    correlations as correlations_mod,
+    experiments as experiments_mod,
+    privacy as privacy_mod,
+    audit as audit_mod,
+    backup as backup_mod,
+    snapshots as snapshots_mod,
+    recovery as recovery_mod,
+    sharing as sharing_mod,
 )
 import asyncio
 
@@ -523,6 +543,11 @@ def whitelist_disable():
     return {"ok": True}
 
 
+@app.get("/whitelist/mode")
+def whitelist_mode_get():
+    return {"enabled": whitelist_mod.is_whitelist_mode(get_conn())}
+
+
 # --- Achievements ---
 @app.get("/achievements")
 def achievements_list():
@@ -550,6 +575,11 @@ def points_get():
 @app.get("/points/history")
 def points_history(limit: int = 50):
     return points_mod.get_history(get_conn(), limit=limit)
+
+
+@app.get("/points/level")
+def points_level():
+    return points_mod.get_level(get_conn())
 
 
 @app.post("/points/award")
@@ -916,6 +946,11 @@ def mode_list():
     return mode_mod.list_modes()
 
 
+@app.get("/modes")
+def modes_alias():
+    return mode_mod.list_modes()
+
+
 # --- Limits ---
 class LimitCreate(BaseModel):
     category: str
@@ -1141,3 +1176,416 @@ def vision_stop():
 @app.get("/vision/last")
 def vision_last():
     return screenshots_mod.get_last_verdict()
+
+
+# ==========================================================================
+# Additional module endpoints (environment, coach, privacy, audit, etc.)
+# ==========================================================================
+
+# --- Environment ---
+class EnvTimezone(BaseModel):
+    tz: str
+
+
+class EnvWorkingHours(BaseModel):
+    start: str
+    end: str
+    days: list = ["monday", "tuesday", "wednesday", "thursday", "friday"]
+
+
+@app.get("/environment")
+def env_get():
+    return environment_mod.get_environment(get_conn())
+
+
+@app.post("/environment/timezone")
+def env_set_tz(body: EnvTimezone):
+    environment_mod.set_timezone(get_conn(), body.tz)
+    return {"ok": True}
+
+
+@app.post("/environment/working-hours")
+def env_set_wh(body: EnvWorkingHours):
+    environment_mod.set_working_hours(get_conn(), body.start, body.end, body.days)
+    return {"ok": True}
+
+
+@app.get("/environment/is-working-hours")
+def env_is_wh():
+    return {"is_working_hours": environment_mod.is_working_hours(get_conn())}
+
+
+# --- Coach ---
+@app.get("/coach/morning")
+async def coach_morning():
+    c = get_conn()
+    api_key = db.get_config(c, "gemini_api_key") or ""
+    return {"briefing": await coach_mod.morning_briefing(c, api_key)}
+
+
+@app.get("/coach/evening")
+async def coach_evening():
+    c = get_conn()
+    api_key = db.get_config(c, "gemini_api_key") or ""
+    return {"reflection": await coach_mod.evening_reflection(c, api_key)}
+
+
+@app.get("/coach/midday")
+async def coach_midday():
+    c = get_conn()
+    api_key = db.get_config(c, "gemini_api_key") or ""
+    return {"checkin": await coach_mod.mid_day_check_in(c, api_key)}
+
+
+@app.get("/coach/patterns")
+async def coach_patterns(days: int = 14):
+    c = get_conn()
+    api_key = db.get_config(c, "gemini_api_key") or ""
+    return await coach_mod.pattern_analysis(c, api_key, days=days)
+
+
+# --- Checkins ---
+class CheckinCreate(BaseModel):
+    interval_minutes: int = 30
+
+
+class CheckinResponse(BaseModel):
+    mood: int
+    note: str = ""
+
+
+@app.post("/checkins")
+def checkin_create(body: CheckinCreate):
+    return {"id": checkins_mod.schedule_checkin(get_conn(), body.interval_minutes)}
+
+
+@app.get("/checkins")
+def checkin_list():
+    return checkins_mod.get_active_checkins(get_conn())
+
+
+@app.delete("/checkins/{checkin_id}")
+def checkin_cancel(checkin_id: int):
+    checkins_mod.cancel_checkin(get_conn(), checkin_id)
+    return {"ok": True}
+
+
+@app.post("/checkins/{checkin_id}/respond")
+def checkin_respond(checkin_id: int, body: CheckinResponse):
+    return {"id": checkins_mod.record_response(get_conn(), checkin_id, body.mood, body.note)}
+
+
+@app.get("/checkins/history")
+def checkin_history(limit: int = 50):
+    return checkins_mod.get_checkin_history(get_conn(), limit)
+
+
+# --- Rituals ---
+class RitualCreate(BaseModel):
+    name: str
+    time_of_day: str
+    items: list
+
+
+@app.post("/rituals")
+def ritual_create(body: RitualCreate):
+    return {"id": rituals_mod.create_ritual(get_conn(), body.name, body.time_of_day, body.items)}
+
+
+@app.get("/rituals")
+def ritual_list():
+    return rituals_mod.get_rituals(get_conn())
+
+
+@app.delete("/rituals/{ritual_id}")
+def ritual_delete(ritual_id: int):
+    rituals_mod.delete_ritual(get_conn(), ritual_id)
+    return {"ok": True}
+
+
+@app.post("/rituals/{ritual_id}/items/{item_index}")
+def ritual_complete_item(ritual_id: int, item_index: int):
+    rituals_mod.complete_ritual_item(get_conn(), ritual_id, item_index)
+    return {"ok": True}
+
+
+@app.get("/rituals/{ritual_id}/progress")
+def ritual_progress(ritual_id: int):
+    return rituals_mod.get_ritual_progress(get_conn(), ritual_id)
+
+
+# --- Profile ---
+@app.get("/profile")
+def profile_get():
+    return profile_mod.get_profile(get_conn())
+
+
+@app.post("/profile/update")
+def profile_update():
+    profile_mod.update_profile(get_conn())
+    return {"ok": True}
+
+
+@app.get("/profile/compare")
+def profile_compare():
+    return profile_mod.compare_to_average(get_conn())
+
+
+# --- Forecasting ---
+@app.get("/forecasting/today")
+def forecast_today():
+    return forecasting_mod.forecast_today(get_conn())
+
+
+@app.get("/forecasting/tomorrow")
+def forecast_tomorrow():
+    return forecasting_mod.forecast_tomorrow(get_conn())
+
+
+@app.get("/forecasting/week")
+def forecast_week():
+    return forecasting_mod.weekly_forecast(get_conn())
+
+
+@app.get("/forecasting/trend")
+def forecast_trend(days: int = 14):
+    return {"trend": forecasting_mod.trend_direction(get_conn(), days)}
+
+
+# --- Alerts ---
+class AlertCreate(BaseModel):
+    name: str
+    condition: str
+    threshold: float
+    action: str
+
+
+@app.post("/alerts")
+def alert_create(body: AlertCreate):
+    return {"id": alerts_mod.create_alert(get_conn(), body.name, body.condition, body.threshold, body.action)}
+
+
+@app.get("/alerts")
+def alert_list():
+    return alerts_mod.get_alerts(get_conn())
+
+
+@app.delete("/alerts/{alert_id}")
+def alert_delete(alert_id: int):
+    alerts_mod.delete_alert(get_conn(), alert_id)
+    return {"ok": True}
+
+
+# --- Correlations ---
+@app.get("/correlations/domain-pairs")
+def corr_domain_pairs():
+    return correlations_mod.correlate_domain_pairs(get_conn())
+
+
+@app.get("/correlations/time-of-day")
+def corr_time_of_day():
+    return correlations_mod.correlate_time_of_day_productivity(get_conn())
+
+
+# --- Experiments ---
+class ExperimentCreate(BaseModel):
+    name: str
+    hypothesis: str
+    duration_days: int = 7
+
+
+@app.post("/experiments")
+def experiment_create(body: ExperimentCreate):
+    return {"id": experiments_mod.start_experiment(get_conn(), body.name, body.hypothesis, body.duration_days)}
+
+
+@app.get("/experiments")
+def experiment_list(status: str = None):
+    return experiments_mod.list_experiments(get_conn(), status)
+
+
+@app.get("/experiments/{experiment_id}")
+def experiment_get(experiment_id: int):
+    return experiments_mod.get_experiment(get_conn(), experiment_id)
+
+
+@app.get("/experiments/{experiment_id}/results")
+def experiment_results(experiment_id: int):
+    return experiments_mod.experiment_results(get_conn(), experiment_id)
+
+
+# --- Privacy ---
+class PrivacyLevel(BaseModel):
+    level: str
+
+
+@app.get("/privacy")
+def privacy_get():
+    return {"level": privacy_mod.get_privacy_level(get_conn()),
+            "config": privacy_mod.get_privacy_config(get_conn())}
+
+
+@app.post("/privacy")
+def privacy_set(body: PrivacyLevel):
+    privacy_mod.set_privacy_level(get_conn(), body.level)
+    return {"ok": True}
+
+
+# --- Audit ---
+@app.get("/audit")
+def audit_get(limit: int = 100):
+    return audit_mod.get_audit_log(get_conn(), limit)
+
+
+@app.get("/audit/verify")
+def audit_verify():
+    return {"valid": audit_mod.verify_chain(get_conn())}
+
+
+# --- Backup ---
+@app.post("/backup")
+def backup_create():
+    return {"path": backup_mod.create_backup(get_conn())}
+
+
+@app.get("/backup")
+def backup_list():
+    return backup_mod.list_backups()
+
+
+# --- Snapshots ---
+@app.post("/snapshots")
+def snapshot_create(trigger: str = "manual"):
+    return {"id": snapshots_mod.take_snapshot(get_conn(), trigger)}
+
+
+@app.get("/snapshots")
+def snapshot_list():
+    return snapshots_mod.list_snapshots(get_conn())
+
+
+@app.get("/snapshots/{snapshot_id}")
+def snapshot_get(snapshot_id: int):
+    return snapshots_mod.get_snapshot(get_conn(), snapshot_id)
+
+
+# --- Recovery ---
+class RecoveryEnter(BaseModel):
+    reason: str
+
+
+@app.post("/recovery/enter")
+def recovery_enter(body: RecoveryEnter):
+    return {"id": recovery_mod.enter_recovery_mode(get_conn(), body.reason)}
+
+
+@app.post("/recovery/exit")
+def recovery_exit():
+    recovery_mod.exit_recovery_mode(get_conn())
+    return {"ok": True}
+
+
+@app.get("/recovery")
+def recovery_status():
+    return recovery_mod.recovery_status(get_conn())
+
+
+# --- Sharing ---
+class ShareCreate(BaseModel):
+    content_type: str
+    content_id: int = None
+
+
+@app.post("/share")
+def share_create(body: ShareCreate):
+    return {"code": sharing_mod.create_share_code(get_conn(), body.content_type, body.content_id)}
+
+
+@app.get("/share/{code}")
+def share_get(code: str):
+    return sharing_mod.get_share_bundle(get_conn(), code) or {"error": "not found"}
+
+
+@app.get("/share")
+def share_list():
+    return sharing_mod.list_my_shares(get_conn())
+
+
+# --- Undo ---
+@app.post("/undo")
+def undo_action():
+    result = undo_mod.undo(get_conn())
+    return result or {"error": "nothing to undo"}
+
+
+@app.post("/redo")
+def redo_action():
+    result = undo_mod.redo(get_conn())
+    return result or {"error": "nothing to redo"}
+
+
+# --- Triggers ---
+class TriggerCreate(BaseModel):
+    event: str
+    action: str
+    params: dict = {}
+
+
+@app.post("/triggers")
+def trigger_create(body: TriggerCreate):
+    return {"id": triggers_mod.create_trigger(get_conn(), body.event, body.action, body.params)}
+
+
+@app.get("/triggers")
+def trigger_list(event: str = None):
+    return triggers_mod.get_triggers(get_conn(), event)
+
+
+@app.delete("/triggers/{trigger_id}")
+def trigger_delete(trigger_id: int):
+    triggers_mod.delete_trigger(get_conn(), trigger_id)
+    return {"ok": True}
+
+
+# --- Patterns ---
+@app.get("/patterns/daily")
+def patterns_daily():
+    return patterns_mod.find_daily_patterns(get_conn())
+
+
+@app.get("/patterns/sessions")
+def patterns_sessions():
+    return patterns_mod.find_work_sessions(get_conn())
+
+
+@app.get("/patterns/peak-distraction")
+def patterns_peak():
+    return {"hour": patterns_mod.peak_distraction_hour(get_conn())}
+
+
+# --- Tags ---
+class TagAdd(BaseModel):
+    rule_id: int
+    tag: str
+
+
+@app.post("/tags")
+def tag_add(body: TagAdd):
+    tags_mod.add_tag(get_conn(), body.rule_id, body.tag)
+    return {"ok": True}
+
+
+@app.get("/tags")
+def tag_list():
+    return tags_mod.list_all_tags(get_conn())
+
+
+@app.get("/tags/{tag}")
+def tag_rules(tag: str):
+    return tags_mod.get_rules_by_tag(get_conn(), tag)
+
+
+# --- Timeline ---
+@app.get("/timeline")
+def timeline_get(date: str = None):
+    return timeline_mod.get_timeline(get_conn(), date)
