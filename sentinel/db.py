@@ -7,7 +7,10 @@ DB_PATH = Path.home() / ".config" / "sentinel" / "sentinel.db"
 def connect(path=None):
     p = path or DB_PATH
     p.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(p))
+    # check_same_thread=False lets the single shared server connection be
+    # used from FastAPI's worker threadpool. WAL + application-level single-
+    # writer semantics keep this safe in practice.
+    conn = sqlite3.connect(str(p), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript("""

@@ -144,7 +144,12 @@ async def create_rule(rule: RuleCreate):
     api_key = db.get_config(c, "gemini_api_key")
     parsed = {}
     if api_key:
-        parsed = await classifier.parse_rule(api_key, rule.text)
+        try:
+            parsed = await classifier.parse_rule(api_key, rule.text)
+        except Exception:
+            # LLM parsing is best-effort — still persist the raw rule text
+            # if the API is unreachable or rejects our request.
+            parsed = {}
     rule_id = db.add_rule(c, rule.text, parsed)
     return {"id": rule_id, "text": rule.text, "parsed": parsed}
 
