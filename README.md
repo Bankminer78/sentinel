@@ -1,333 +1,148 @@
-# Sentinel — The world's first AI-native accountability app
+# Sentinel
 
-> Every feature powered by an LLM. More features than every competitor combined.
+A lean, AI-native accountability app for macOS.
 
-Sentinel is a local-first, terminal-native accountability tool. You write rules in plain English, an LLM parses them into structured behavior, and a daemon enforces them on your machine. 71 modules, 1387 tests, 8227 lines of Python — and roughly one feature per 100 LoC.
+You interact through a native macOS GUI. Your external AI agents (your personal Claude, etc.) interact through a local REST API. The app keeps a small, sharp core of features that can't be done by an AI; everything else is a generic store the AI can use freely.
 
 ```
-71 modules · 1387 tests · 8227 LoC · 0 dependencies on the cloud for your data
+21 Python modules · 509 tests · 2,783 LoC · native macOS app
 ```
 
----
+## What it does
 
-## Why Sentinel
+- **Blocks distractions** with natural-language rules ("Block YouTube during work hours") parsed by an LLM into structured conditions, enforced via `/etc/hosts` and process killing.
+- **Monitors activity** — foreground app, window title, browser URL — and classifies new domains automatically with Gemini Flash.
+- **Common productivity** — pomodoro and locked focus sessions. That's it. No kanban, no journal, no habit tracker — your AI can build those on top.
+- **AI Q&A** — ask questions about your data in plain English.
+- **Generic AI Store** — a key/value + document store the AI can use to track anything (habits, notes, custom metrics) without you having to ship a feature for it.
+- **macOS GUI** — a native menu-bar app with a WKWebView dashboard.
+- **REST API** — everything the GUI does, your external agents can do too.
 
-| Feature                          | Sentinel | Cold Turkey | SelfControl | Freedom | Opal | Overlord | RescueTime |
-|----------------------------------|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| Natural-language rules           | ✓ |   |   |   |   |   |   |
-| LLM-classified activity          | ✓ |   |   |   |   |   |   |
-| Context-aware blocking           | ✓ |   |   |   |   |   |   |
-| Domain blocking                  | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |   |
-| App blocking                     | ✓ | ✓ |   | ✓ | ✓ | ✓ |   |
-| Whitelist mode                   | ✓ | ✓ |   | ✓ |   |   |   |
-| Hard lockdown                    | ✓ | ✓ |   | ✓ |   |   |   |
-| Pomodoro                         | ✓ |   |   |   |   |   |   |
-| Focus modes                      | ✓ | ✓ |   | ✓ | ✓ |   |   |
-| Schedules                        | ✓ | ✓ |   | ✓ | ✓ |   |   |
-| Friction interventions           | ✓ | ✓ |   |   | ✓ |   |   |
-| AI negotiation to unblock        | ✓ |   |   |   |   |   |   |
-| Photo proof                      | ✓ |   |   |   |   |   |   |
-| Achievements + XP + levels       | ✓ |   |   |   |   |   |   |
-| Challenges + leaderboards        | ✓ |   |   |   |   |   |   |
-| Habit tracker                    | ✓ |   |   |   |   |   |   |
-| Journal with mood + AI search    | ✓ |   |   |   |   |   |   |
-| Commitments with stakes          | ✓ |   |   |   |   |   |   |
-| Long-form journeys               | ✓ |   |   |   |   |   |   |
-| Daily rituals                    | ✓ |   |   |   |   |   |   |
-| Behavioral forecasting           | ✓ |   |   |   |   |   |   |
-| Correlation discovery            | ✓ |   |   |   |   |   |   |
-| Self-experiments                 | ✓ |   |   |   |   |   |   |
-| Pattern detection                | ✓ |   |   |   |   |   |   |
-| Trigger detection                | ✓ |   |   |   |   |   |   |
-| AI Q&A over your own data        | ✓ |   |   |   |   |   |   |
-| Slack / Discord / SMS / email    | ✓ |   |   |   |   |   |   |
-| Webhooks                         | ✓ |   |   |   |   |   |   |
-| iCal calendar sync               | ✓ |   |   |   |   |   |   |
-| Voice commands                   | ✓ |   |   |   |   |   |   |
-| 3 privacy levels                 | ✓ |   |   |   |   |   |   |
-| Local encryption + PII redaction | ✓ |   |   |   |   |   |   |
-| Audit log                        | ✓ |   |   |   |   |   |   |
-| Accountability partners          | ✓ |   |   | ✓ |   |   |   |
-| Financial penalties              | ✓ |   |   |   |   |   |   |
-| Undo / sharing / sync / backup   | ✓ |   |   |   |   |   |   |
-| Web dashboard + realtime SSE     | ✓ |   |   |   |   |   | ✓ |
-| CLI                              | ✓ |   |   |   |   |   |   |
-| Browser extension                | ✓ | ✓ |   | ✓ | ✓ |   |   |
-| Local-first                      | ✓ |   | ✓ |   |   |   |   |
-| Open source                      | ✓ |   | ✓ |   |   |   |   |
+## What it doesn't do
 
-Sentinel is the only one that wins on every row.
+Earlier versions had 200+ feature modules (life-OS, wellness, knowledge management, etc.). Those were cut. The principle: **if a feature can be reproduced by an AI agent writing to a generic store, it should not be a hardcoded feature.**
 
----
-
-## Features
-
-### Blocking
-- Domain blocking via `/etc/hosts` and DNS flush
-- App blocking via process kill
-- Whitelist mode — block everything except what you allow
-- Hard lockdown — password-gated, time-boxed, no exits
-
-### AI classification
-- LLM-powered rule parsing (Gemini Flash)
-- Context-aware verdicts (`reddit.com/r/programming` vs `reddit.com/r/funny`)
-- Skiplist of 60+ utility domains so the LLM never wastes a token on `google.com`
-
-### Scheduling
-- Pomodoro with configurable work/break/cycles
-- Focus modes (locked or soft)
-- Time-of-day and day-of-week schedules
-- Break allowances per rule
-
-### Interventions
-- Countdown overlay
-- Breathing exercise
-- Typing challenge
-- AI negotiation — chat with the LLM to earn unblock time
-- Photo proof of task completion
-- Math problem
-
-### Gamification
-- Achievements
-- XP and levels
-- Challenges with deadlines
-- Leaderboards (local or shared)
-- Streaks
-
-### Tracking
-- Habits with frequency and targets
-- Journal with mood, tags, and AI search
-- Time tracker by project
-- Commitments with stakes
-- Multi-step journeys with milestones
-- Daily rituals
-
-### Intelligence
-- User profile inferred from behavior
-- Behavioral forecasting (what will you do tomorrow?)
-- Correlation discovery (sleep vs productivity, etc.)
-- Self-experiments (A/B test yourself)
-- Pattern detection
-- Daily and weekly reports
-
-### Integrations
-- Slack notifications
-- Discord notifications
-- Email
-- SMS via Twilio
-- Webhooks
-- iCal calendar sync
-- Voice commands
-
-### Privacy
-- 3 privacy levels (open / private / paranoid)
-- Local encryption at rest
-- Automatic PII redaction before LLM calls
-- Append-only audit log
-
-### Accountability
-- Accountability partners (notified on bypass)
-- Financial penalties on bypass
-- Shared leaderboards
-
-### Advanced
-- Undo for any destructive action
-- Tags on rules
-- Triggers (event-driven rules)
-- Alerts
-- Sharing rule packs
-- Encrypted backup
-- Multi-device sync
-- Modes (work / weekend / vacation / custom)
-
-### Dashboard
-- Web dashboard
-- Realtime updates over Server-Sent Events
-- CLI with 100+ subcommands
-- Browser extension (Chrome MV3 / Arc)
-
----
-
-## Quick start
+## Install
 
 ```bash
+git clone https://github.com/Bankminer78/sentinel.git ~/git/sentinel
+cd ~/git/sentinel
 pip install -e .
-sentinel serve &
-sentinel config --api-key YOUR_GEMINI_KEY
-sentinel add "Block YouTube during work hours"
-sentinel add "No social media on weekdays 9am to 6pm"
-sentinel pomodoro start
-sentinel status
+./macos/build.sh
+open ./build/Sentinel.app
 ```
 
-That's it. The daemon is running, your rules are live, and the LLM is classifying every new domain as it appears.
+Then click the 🛡 in your menu bar.
 
----
+## API surface (for external agents)
+
+The server runs at `http://127.0.0.1:9849`. Key endpoints:
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /status` | Current foreground app, active rules, blocks |
+| `GET /activities?limit=N&since=TS` | Raw activity log for analysis |
+| `GET /stats` | Today's score, breakdown, top distractions |
+| `GET /stats/week` · `/stats/month` | Time-windowed summaries |
+| `POST /rules` `{text}` | Add a natural-language rule |
+| `POST /block/{domain}` · `DELETE /block/{domain}` | Manual block/unblock |
+| `POST /pomodoro/start` · `POST /focus/start` | Productivity sessions |
+| `POST /ask` `{question}` | Natural-language query over user's data |
+| `POST /ai/kv` `{namespace, key, value}` | Generic K/V store for the AI |
+| `GET /ai/kv/{namespace}/{key}` | Read |
+| `POST /ai/docs` `{namespace, doc, tags}` | Append-only document store |
+| `GET /ai/docs?namespace=X&since=TS` | Read documents |
+| `GET /ai/search?q=X` | Full-text across the AI store |
+| `GET /ai/summary` | What the AI has stored (overview) |
+| `POST /chat/sessions` · `POST /chat/messages` | Persistent chat memory |
+| `POST /vision/snapshot` | Take a screenshot, classify with vision LLM |
+| `GET /audit` · `POST /backup` | Audit trail and SQLite backup |
+
+The full list lives in `sentinel/server.py`.
+
+### How an external agent uses this
+
+```python
+import httpx
+SENTINEL = "http://127.0.0.1:9849"
+
+# Read what the user has been doing
+acts = httpx.get(f"{SENTINEL}/activities?limit=200").json()
+
+# Ask Sentinel's own AI a question
+ans = httpx.post(f"{SENTINEL}/ask", json={"question": "How much time on YouTube this week?"}).json()
+
+# Track something the user wanted (no specialized module needed)
+httpx.post(f"{SENTINEL}/ai/docs", json={
+    "namespace": "habits",
+    "doc": {"name": "meditate", "completed": True, "duration_min": 10},
+    "tags": ["wellness"],
+})
+
+# Read it back later
+docs = httpx.get(f"{SENTINEL}/ai/docs?namespace=habits").json()
+```
 
 ## Architecture
 
 ```
-                   +------------------+
-                   |   CLI (click)    |
-                   +--------+---------+
-                            |
-+-------------------+   +---v---------------+   +-------------------+
-| Browser Extension +-->|   FastAPI Server  +-->| Block Enforcer    |
-| (Chrome MV3)      |   |   localhost:9849  |   | /etc/hosts + kill |
-+-------------------+   +---+---------------+   +-------------------+
-                            |
-                   +--------v---------+
-                   |  LLM Classifier  |
-                   |  (Gemini Flash)  |
-                   +--------+---------+
-                            |
-                   +--------v---------+        +------------------+
-                   |  SQLite (local)  +<------>+  Realtime SSE    |
-                   +------------------+        +------------------+
++----------------------------+
+|   Sentinel.app (Swift)     |
+|   ┌──────────────────┐     |
+|   │ Menu bar 🛡      │     |    <-- you click here
+|   │ WKWebView window │     |
+|   └────────┬─────────┘     |
+|            │ HTTP           |
++------------┼----------------+
+             │
+             v
++----------------------------+         +---------------------+
+|   Python FastAPI server    | <-----> | External agent      |
+|   (sentinel.cli serve)     |  HTTP   | (your Claude, etc.) |
+|                            |         +---------------------+
+|   - Rules + LLM parsing    |
+|   - Activity monitor       |
+|   - /etc/hosts blocking    |
+|   - AI K/V + doc store     |
+|   - Chat memory            |
+|   - Q&A                    |
+|                            |
+|   SQLite (~/.config/...)   |
++----------------------------+
 ```
 
-All your data stays on your machine. The only outbound traffic is structured prompts to the LLM provider you configured.
+20 Python modules, all self-contained, all functional style:
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full module map.
-
----
-
-## CLI reference
-
-### Core
-```
-sentinel serve                            start the FastAPI daemon
-sentinel config --api-key KEY             set the LLM API key
-sentinel add "<rule in english>"          add a rule
-sentinel rules                            list rules
-sentinel remove <id>                      remove a rule
-sentinel toggle <id>                      enable/disable a rule
-sentinel block <domain>                   block a single domain
-sentinel unblock <domain>                 unblock a single domain
-sentinel status                           current activity + active rules
-sentinel stats                            today's productivity score
-sentinel score                            productivity score
-sentinel week                             weekly summary
-sentinel top                              top apps and domains
-sentinel ask "<question>"                 ask the LLM about your own data
-```
-
-### Focus and time
-```
-sentinel pomodoro start --work 25 --break 5 --cycles 4
-sentinel pomodoro status
-sentinel pomodoro stop
-sentinel focus start --minutes 90 --locked
-sentinel focus status
-sentinel mode switch work
-sentinel mode current
-sentinel limit add social daily 1800
-sentinel limit status
-```
-
-### Tracking
-```
-sentinel habit add "Read 30 min" daily 1
-sentinel habit log <id>
-sentinel habit today
-sentinel journal add "Felt focused today" --mood 8 --tags work,flow
-sentinel journal mood
-sentinel commitment add "Ship v1" --deadline 2026-05-01 --stakes 100
-sentinel journey create "Learn Rust" --milestones 10
-sentinel tracker start sentinel "writing docs"
-sentinel tracker stop
-```
-
-### Gamification
-```
-sentinel achievement list
-sentinel achievement check
-sentinel points total
-sentinel challenge create "No twitter week" 168
-sentinel leaderboard show
-```
-
-### Accountability and lockdown
-```
-sentinel partner add Alex alex@example.com email
-sentinel penalty list
-sentinel lockdown enter --minutes 240 --password-hash ...
-sentinel lockdown status
-sentinel whitelist enable
-sentinel whitelist add github.com
-```
-
-### Intelligence
-```
-sentinel report daily
-sentinel report weekly
-sentinel report peak-hours
-sentinel report triggers
-sentinel smart duplicates
-sentinel smart conflicts
-sentinel smart suggestions
-sentinel smart explain youtube.com
-sentinel digest daily
-sentinel digest weekly
-```
-
-### Integrations and exports
-```
-sentinel calendar sync <ical_url>
-sentinel calendar in-meeting
-sentinel notify "Title" "Message" --channels slack,email
-sentinel export
-sentinel import <path>
-sentinel export-rules-md
-sentinel export-report-html
-sentinel sync push
-sentinel sync pull
-```
-
-### Setup helpers
-```
-sentinel onboarding check
-sentinel onboarding apply student
-sentinel template list
-sentinel template apply deep-work
-sentinel sensitivity set paranoid
-sentinel health
-```
-
-Run `sentinel --help` or `sentinel <command> --help` for everything else.
-
----
-
-## Stats
-
-| | |
+| Module | Purpose |
 |---|---|
-| Modules               | **71** |
-| Tests                 | **1387** (passing in ~2.3s) |
-| Lines of Python       | **8227** |
-| Features per 100 LoC  | **~1.0** |
-| External services required | **0** (LLM provider is pluggable, data is local) |
+| `db` | SQLite connection + core tables |
+| `blocker` | Block domains via `/etc/hosts`, kill apps |
+| `skiplist` | 60+ utility domains never classified |
+| `monitor` | macOS foreground app + browser URL polling |
+| `classifier` | Gemini Flash classification + NL rule parsing |
+| `scheduler` | Pomodoro + focus sessions (the only "productivity" features) |
+| `interventions` | 5-second countdown overlay + friction types |
+| `persistence` | LaunchDaemon tamper detection |
+| `stats` | Productivity score + breakdown + top distractions |
+| `query` | Natural-language Q&A over user data |
+| `ai_store` | **Generic K/V + document store for AI agents** |
+| `chat_history` | Persistent AI chat sessions |
+| `screenshots` | Optional vision-LLM snapshot analysis |
+| `search` | Full-text search across all data |
+| `privacy` | 3 privacy levels + PII redaction + wipe |
+| `audit` | Tamper-evident hash-chain audit log |
+| `backup` | SQLite snapshot backup/restore |
+| `cache` | TTL cache helper |
+| `ui` | Single-file HTML/CSS/JS dashboard |
+| `server` | FastAPI — the only thing GUI/agents talk to |
+| `cli` | `sentinel serve` (used by the macOS app) |
 
-Sentinel is small on purpose. Every line earns its place. The LLM does the work that would otherwise be a thousand lines of regex and classification rules.
+## Tests
 
+```bash
+python -m pytest tests/   # 509 tests in <1s
 ```
-$ python -m pytest tests/
-1387 passed, 2 warnings in 2.30s
-```
-
----
 
 ## License
 
-MIT. Do whatever you want with it.
-
----
-
-## Credits
-
-Built with:
-- [click](https://click.palletsprojects.com/) for the CLI
-- [FastAPI](https://fastapi.tiangolo.com/) + [uvicorn](https://www.uvicorn.org/) for the local server
-- [Gemini Flash](https://ai.google.dev/) for the LLM work
-- [pyobjc](https://pyobjc.readthedocs.io/) for macOS APIs
-- The hard-won lessons of every accountability app that came before — Cold Turkey, SelfControl, Freedom, Opal, Overlord, RescueTime — none of which were AI-native, all of which made this one possible.
+MIT

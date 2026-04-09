@@ -1,7 +1,6 @@
-"""Backup and restore Sentinel data."""
-import json, shutil, os, time
+"""Backup and restore Sentinel data — full SQLite snapshot."""
+import shutil, time
 from pathlib import Path
-from . import importer
 
 _DEFAULT_DIR = Path.home() / ".config" / "sentinel" / "backups"
 
@@ -12,27 +11,40 @@ def _default_dir() -> Path:
 
 
 def create_backup(conn, backup_path: str = None) -> str:
-    data = importer.export_all(conn)
-    data["backup_version"] = 1
-    data["backup_ts"] = time.time()
+    """Create a full SQLite backup. Uses sqlite3.backup() for consistency."""
     if backup_path is None:
         stamp = time.strftime("%Y%m%d-%H%M%S")
-        backup_path = str(_default_dir() / f"sentinel-backup-{stamp}.json")
+        backup_path = str(_default_dir() / f"sentinel-{stamp}.db")
     p = Path(backup_path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(data, indent=2))
+    import sqlite3
+    dst = sqlite3.connect(str(p))
+    try:
+        conn.backup(dst)
+    finally:
+        dst.close()
     return str(p)
 
 
 def restore_backup(conn, backup_path: str) -> dict:
+    """Restore: copy backup over current DB. Returns row counts."""
     p = Path(backup_path)
     if not p.exists():
-        return {"error": "not found", "rules": 0, "goals": 0, "partners": 0, "config": 0}
+        return {"error": "not found"}
+    import sqlite3
+    src = sqlite3.connect(str(p))
     try:
-        data = json.loads(p.read_text())
-    except Exception:
-        return {"error": "invalid", "rules": 0, "goals": 0, "partners": 0, "config": 0}
-    return importer.import_all(conn, data)
+        src.backup(conn)
+    finally:
+        src.close()
+    counts = {}
+    for table in ("rules", "activity_log", "seen_domains", "ai_kv", "ai_docs"):
+        try:
+            r = conn.execute(f"SELECT COUNT(*) as c FROM {table}").fetchone()
+            counts[table] = r[0] if r else 0
+        except Exception:
+            counts[table] = 0
+    return counts
 
 
 def list_backups(backup_dir: str = None) -> list:
@@ -40,11 +52,10 @@ def list_backups(backup_dir: str = None) -> list:
     if not d.exists():
         return []
     out = []
-    for f in sorted(d.glob("sentinel-backup-*.json"), reverse=True):
+    for f in sorted(d.glob("sentinel-*.db"), reverse=True):
         try:
             st = f.stat()
-            out.append({"path": str(f), "name": f.name,
-                        "size": st.st_size, "mtime": st.st_mtime})
+            out.append({"path": str(f), "name": f.name, "size": st.st_size, "mtime": st.st_mtime})
         except OSError:
             continue
     return out
@@ -73,8 +84,16 @@ def verify_backup(backup_path: str) -> bool:
     p = Path(backup_path)
     if not p.exists():
         return False
+    # Check SQLite magic header
     try:
-        data = json.loads(p.read_text())
+        with open(p, "rb") as f:
+            header = f.read(16)
+        if not header.startswith(b"SQLite format 3"):
+            return False
+        import sqlite3
+        c = sqlite3.connect(str(p))
+        c.execute("PRAGMA integrity_check").fetchone()
+        c.close()
+        return True
     except Exception:
         return False
-    return isinstance(data, dict) and "rules" in data
