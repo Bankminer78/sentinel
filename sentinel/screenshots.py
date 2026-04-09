@@ -30,7 +30,7 @@ async def analyze_screenshot(image_path: str, api_key: str, prompt: str) -> str:
         return ""
     async with httpx.AsyncClient(timeout=15) as client:
         r = await client.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}",
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={api_key}",
             json={"contents": [{"parts": [
                 {"text": prompt},
                 {"inline_data": {"mime_type": "image/png", "data": data}}]}],

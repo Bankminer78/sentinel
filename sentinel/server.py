@@ -13,7 +13,7 @@ from . import (
     db, classifier, monitor, blocker, skiplist, scheduler, interventions,
     persistence, stats as stats_mod, query as query_mod, ai_store,
     chat_history, screenshots, search as search_mod, privacy as privacy_mod,
-    audit as audit_mod, backup as backup_mod, cache, ui,
+    audit as audit_mod, backup as backup_mod, cache, ui, triggers as triggers_mod,
 )
 
 app = FastAPI(title="Sentinel")
@@ -34,6 +34,12 @@ def startup():
     conn = db.connect()
     monitor.start()
     persistence.start_watcher()
+    triggers_mod.start_worker(conn)
+
+
+@app.on_event("shutdown")
+def shutdown():
+    triggers_mod.stop_worker()
 
 
 # --- Web UI ---
@@ -426,3 +432,95 @@ def backup_create():
 @app.get("/backups")
 def backups_list():
     return backup_mod.list_backups()
+
+
+# --- Triggers (AI-authored features) ---
+class TriggerCreate(BaseModel):
+    name: str
+    interval_sec: int = 300
+    description: str = ""
+    recipe: dict
+
+
+class TriggerAuthor(BaseModel):
+    request: str
+
+
+@app.post("/triggers")
+def triggers_create(body: TriggerCreate):
+    try:
+        tid = triggers_mod.create(get_conn(), body.name, body.recipe,
+                                  interval_sec=body.interval_sec,
+                                  description=body.description)
+        audit_mod.log_action(get_conn(), "trigger.create",
+                             {"name": body.name, "id": tid})
+        return {"id": tid, "name": body.name}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/triggers")
+def triggers_list():
+    return triggers_mod.list_all(get_conn())
+
+
+@app.get("/triggers/calls")
+def triggers_calls():
+    """The operations triggers can call. Used by the LLM author too."""
+    return triggers_mod.list_calls()
+
+
+@app.get("/triggers/{name}")
+def triggers_get(name: str):
+    t = triggers_mod.get(get_conn(), name)
+    if not t:
+        raise HTTPException(404, "not found")
+    return t
+
+
+@app.delete("/triggers/{name}")
+def triggers_delete(name: str):
+    triggers_mod.delete(get_conn(), name)
+    audit_mod.log_action(get_conn(), "trigger.delete", {"name": name})
+    return {"ok": True}
+
+
+@app.post("/triggers/{name}/toggle")
+def triggers_toggle(name: str):
+    t = triggers_mod.get(get_conn(), name)
+    if not t:
+        raise HTTPException(404, "not found")
+    triggers_mod.set_enabled(get_conn(), name, not bool(t.get("enabled")))
+    return {"ok": True, "enabled": not bool(t.get("enabled"))}
+
+
+@app.post("/triggers/{name}/run")
+def triggers_run(name: str):
+    return triggers_mod.run_once(get_conn(), name)
+
+
+@app.post("/triggers/author")
+async def triggers_author(body: TriggerAuthor):
+    """Plain English → trigger recipe via internal Gemini agent. Saves it."""
+    import httpx
+    c = get_conn()
+    api_key = db.get_config(c, "gemini_api_key")
+    if not api_key:
+        raise HTTPException(400, "API key not set")
+    try:
+        spec = await triggers_mod.author_from_text(api_key, body.request)
+    except ValueError as e:
+        raise HTTPException(400, f"author failed: {e}")
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(502, f"LLM upstream error: {e.response.status_code}")
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"LLM network error: {e}")
+    try:
+        tid = triggers_mod.create(c, spec["name"], spec["recipe"],
+                                  interval_sec=int(spec.get("interval_sec", 300)),
+                                  description=spec.get("description", ""))
+    except ValueError as e:
+        raise HTTPException(400, f"validate failed: {e}")
+    audit_mod.log_action(c, "trigger.author",
+                         {"name": spec["name"], "request": body.request})
+    return {"id": tid, "spec": spec}

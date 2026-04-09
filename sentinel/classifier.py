@@ -47,9 +47,11 @@ Respond with ONLY one of: "block", "warn", or "allow". No explanation."""
 
 async def call_gemini(api_key: str, prompt: str, max_tokens: int = 50) -> str:
     """Call Gemini Flash API."""
-    async with httpx.AsyncClient(timeout=10) as client:
+    # Longer timeout for author-style calls that generate larger structured output.
+    timeout = 60 if max_tokens > 500 else 15
+    async with httpx.AsyncClient(timeout=timeout) as client:
         r = await client.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}",
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={api_key}",
             json={"contents": [{"parts": [{"text": prompt}]}],
                   "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0}})
         r.raise_for_status()

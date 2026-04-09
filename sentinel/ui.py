@@ -121,6 +121,7 @@ button.secondary:hover { background: rgba(255,255,255,0.06); }
     <nav class="nav">
       <button class="active" data-tab="dashboard">Dashboard</button>
       <button data-tab="rules">Rules</button>
+      <button data-tab="triggers">Triggers</button>
       <button data-tab="activity">Activity</button>
       <button data-tab="ask">Ask</button>
       <button data-tab="settings">Settings</button>
@@ -153,6 +154,17 @@ button.secondary:hover { background: rgba(255,255,255,0.06); }
         <button class="primary" style="margin-top:8px" onclick="addRule()">Add rule</button>
       </div>
       <div id="rules-list"></div>
+    </div>
+
+    <div id="tab-triggers" style="display:none">
+      <h2>Triggers</h2>
+      <p class="sub">AI-authored features. Describe one in plain English — Sentinel writes &amp; runs it.</p>
+      <div class="card">
+        <input id="new-trigger" placeholder="e.g. Every 5 min check vision; if I'm distracted 3x in a row, block the current site" />
+        <button class="primary" style="margin-top:8px" onclick="authorTrigger()">Author with AI</button>
+        <div id="trigger-author-status" style="margin-top:8px;color:var(--text-muted);font-size:12px"></div>
+      </div>
+      <div id="triggers-list"></div>
     </div>
 
     <div id="tab-activity" style="display:none">
@@ -214,6 +226,7 @@ document.querySelectorAll('.nav button').forEach(b => b.addEventListener('click'
   document.getElementById('tab-' + b.dataset.tab).style.display='block';
   if (b.dataset.tab === 'dashboard') refreshDashboard();
   if (b.dataset.tab === 'rules') refreshRules();
+  if (b.dataset.tab === 'triggers') refreshTriggers();
   if (b.dataset.tab === 'activity') refreshActivity();
   if (b.dataset.tab === 'settings') refreshSettings();
 }));
@@ -288,6 +301,66 @@ async function refreshActivity() {
     '<span class="verdict ' + (a.verdict === 'block' ? 'block' : '') + '">' + (a.verdict || '') + '</span>' +
     '</div>'
   ).join('');
+}
+
+async function refreshTriggers() {
+  const ts = await api('/triggers');
+  const list = document.getElementById('triggers-list');
+  if (!ts || ts.length === 0) {
+    list.innerHTML = '<div class="empty">No triggers yet. Author one above.</div>';
+    return;
+  }
+  list.innerHTML = ts.map(t => {
+    const last = t.last_run ? new Date(t.last_run * 1000).toLocaleTimeString() : 'never';
+    const stat = t.last_status === 'ok' ? '✓' : (t.last_status ? '!' : '·');
+    return '<div class="rule" style="flex-direction:column;align-items:stretch;gap:6px">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center">' +
+      '<div class="text"><strong>' + t.name + '</strong> ' +
+      '<span style="color:var(--text-muted);font-size:11px">every ' + t.interval_sec + 's · last ' + last + ' ' + stat + '</span></div>' +
+      '<div class="actions">' +
+      '<button class="secondary" onclick="runTrigger(\'' + t.name + '\')">Run</button>' +
+      '<div class="toggle ' + (t.enabled ? 'on' : '') + '" onclick="toggleTrigger(\'' + t.name + '\')"></div>' +
+      '<button class="secondary" onclick="deleteTrigger(\'' + t.name + '\')">Delete</button>' +
+      '</div></div>' +
+      (t.description ? '<div style="color:var(--text-muted);font-size:12px">' + t.description + '</div>' : '') +
+      '</div>';
+  }).join('');
+}
+
+async function authorTrigger() {
+  const text = document.getElementById('new-trigger').value.trim();
+  if (!text) return;
+  const status = document.getElementById('trigger-author-status');
+  status.textContent = 'Asking the internal agent to author this…';
+  try {
+    const r = await fetch(API + '/triggers/author', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ request: text }),
+    });
+    const j = await r.json();
+    if (!r.ok) { status.textContent = 'Failed: ' + (j.detail || r.status); return; }
+    status.textContent = 'Created: ' + j.spec.name;
+    document.getElementById('new-trigger').value = '';
+    refreshTriggers();
+  } catch (e) {
+    status.textContent = 'Error: ' + e.message;
+  }
+}
+
+async function runTrigger(name) {
+  await api('/triggers/' + encodeURIComponent(name) + '/run', 'POST');
+  refreshTriggers();
+}
+
+async function toggleTrigger(name) {
+  await api('/triggers/' + encodeURIComponent(name) + '/toggle', 'POST');
+  refreshTriggers();
+}
+
+async function deleteTrigger(name) {
+  if (!confirm('Delete trigger ' + name + '?')) return;
+  await api('/triggers/' + encodeURIComponent(name), 'DELETE');
+  refreshTriggers();
 }
 
 async function sendChat() {

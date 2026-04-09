@@ -5,7 +5,7 @@ A lean, AI-native accountability app for macOS.
 You interact through a native macOS GUI. Your external AI agents (your personal Claude, etc.) interact through a local REST API. The app keeps a small, sharp core of features that can't be done by an AI; everything else is a generic store the AI can use freely.
 
 ```
-21 Python modules · 509 tests · 2,783 LoC · native macOS app
+22 Python modules · 574 tests · 3,496 LoC · native macOS app
 ```
 
 ## What it does
@@ -14,6 +14,7 @@ You interact through a native macOS GUI. Your external AI agents (your personal 
 - **Monitors activity** — foreground app, window title, browser URL — and classifies new domains automatically with Gemini Flash.
 - **Common productivity** — pomodoro and locked focus sessions. That's it. No kanban, no journal, no habit tracker — your AI can build those on top.
 - **AI Q&A** — ask questions about your data in plain English.
+- **AI-Authored Triggers** — describe a feature in plain English, the internal Gemini agent writes a trigger recipe, Sentinel runs it on a schedule. No code, no shipped module.
 - **Generic AI Store** — a key/value + document store the AI can use to track anything (habits, notes, custom metrics) without you having to ship a feature for it.
 - **macOS GUI** — a native menu-bar app with a WKWebView dashboard.
 - **REST API** — everything the GUI does, your external agents can do too.
@@ -47,6 +48,9 @@ The server runs at `http://127.0.0.1:9849`. Key endpoints:
 | `POST /rules` `{text}` | Add a natural-language rule |
 | `POST /block/{domain}` · `DELETE /block/{domain}` | Manual block/unblock |
 | `POST /pomodoro/start` · `POST /focus/start` | Productivity sessions |
+| `POST /triggers/author` `{request}` | Plain English → trigger recipe (internal Gemini authors it) |
+| `POST /triggers` · `GET /triggers` · `POST /triggers/{name}/run` | CRUD + manual execution of triggers |
+| `GET /triggers/calls` | The operations a recipe can call (for the LLM author) |
 | `POST /ask` `{question}` | Natural-language query over user's data |
 | `POST /ai/kv` `{namespace, key, value}` | Generic K/V store for the AI |
 | `GET /ai/kv/{namespace}/{key}` | Read |
@@ -111,7 +115,7 @@ docs = httpx.get(f"{SENTINEL}/ai/docs?namespace=habits").json()
 +----------------------------+
 ```
 
-20 Python modules, all self-contained, all functional style:
+21 Python modules, all self-contained, all functional style:
 
 | Module | Purpose |
 |---|---|
@@ -126,6 +130,7 @@ docs = httpx.get(f"{SENTINEL}/ai/docs?namespace=habits").json()
 | `stats` | Productivity score + breakdown + top distractions |
 | `query` | Natural-language Q&A over user data |
 | `ai_store` | **Generic K/V + document store for AI agents** |
+| `triggers` | **AI-authored features**: scheduled recipes (DSL) the internal Gemini writes from English |
 | `chat_history` | Persistent AI chat sessions |
 | `screenshots` | Optional vision-LLM snapshot analysis |
 | `search` | Full-text search across all data |
