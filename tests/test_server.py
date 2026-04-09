@@ -24,13 +24,42 @@ def _make_test_conn():
         );
         CREATE TABLE IF NOT EXISTS activity_log (
             id INTEGER PRIMARY KEY, ts REAL, app TEXT, title TEXT,
-            url TEXT, domain TEXT, verdict TEXT, rule_id INTEGER
+            url TEXT, domain TEXT, verdict TEXT, rule_id INTEGER,
+            duration_s REAL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS seen_domains (
             domain TEXT PRIMARY KEY, category TEXT, first_seen REAL
         );
         CREATE TABLE IF NOT EXISTS config (
             key TEXT PRIMARY KEY, value TEXT
+        );
+        CREATE TABLE IF NOT EXISTS pomodoro_sessions (
+            id INTEGER PRIMARY KEY, start_ts REAL,
+            work_minutes INTEGER, break_minutes INTEGER,
+            total_cycles INTEGER, current_cycle INTEGER DEFAULT 1,
+            state TEXT DEFAULT 'work', ended_at REAL
+        );
+        CREATE TABLE IF NOT EXISTS focus_sessions (
+            id INTEGER PRIMARY KEY, start_ts REAL,
+            duration_minutes INTEGER, locked INTEGER DEFAULT 1,
+            ended_at REAL
+        );
+        CREATE TABLE IF NOT EXISTS allowance_log (
+            id INTEGER PRIMARY KEY, rule_id INTEGER,
+            date TEXT, seconds_used INTEGER DEFAULT 0,
+            UNIQUE(rule_id, date)
+        );
+        CREATE TABLE IF NOT EXISTS interventions (
+            id INTEGER PRIMARY KEY, kind TEXT, context TEXT, state TEXT,
+            created_at REAL, completed_at REAL, passed INTEGER, attempts INTEGER DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS goals (
+            id INTEGER PRIMARY KEY, name TEXT, target_type TEXT,
+            target_value INTEGER, category TEXT, created_at REAL
+        );
+        CREATE TABLE IF NOT EXISTS streaks (
+            goal_name TEXT PRIMARY KEY, current INTEGER DEFAULT 0,
+            longest INTEGER DEFAULT 0, last_date TEXT
         );
     """)
     return conn
@@ -312,3 +341,228 @@ class TestActivityEndpoint:
                 "title": "New Site",
             })
         assert r.json()["verdict"] == "allow"
+
+
+# ---------------------------------------------------------------------------
+# Pomodoro endpoints
+# ---------------------------------------------------------------------------
+
+
+class TestPomodoroEndpoints:
+    """Tests for /pomodoro endpoints."""
+
+    def test_pomodoro_start(self, client):
+        r = client.post("/pomodoro/start", json={"work_minutes": 25, "break_minutes": 5, "cycles": 4})
+        assert r.status_code == 200
+        data = r.json()
+        assert "id" in data
+        assert data["state"] == "work"
+
+    def test_pomodoro_state_after_start(self, client):
+        client.post("/pomodoro/start", json={"work_minutes": 25, "break_minutes": 5, "cycles": 4})
+        r = client.get("/pomodoro")
+        assert r.status_code == 200
+        data = r.json()
+        assert data.get("state") == "work"
+
+    def test_pomodoro_stop(self, client):
+        client.post("/pomodoro/start", json={"work_minutes": 25, "break_minutes": 5, "cycles": 4})
+        r = client.delete("/pomodoro")
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+        # After stop, state should be empty
+        r2 = client.get("/pomodoro")
+        assert r2.json() == {}
+
+    def test_pomodoro_empty_when_none(self, client):
+        r = client.get("/pomodoro")
+        assert r.status_code == 200
+        assert r.json() == {}
+
+
+# ---------------------------------------------------------------------------
+# Focus session endpoints
+# ---------------------------------------------------------------------------
+
+
+class TestFocusEndpoints:
+    """Tests for /focus endpoints."""
+
+    def test_focus_start(self, client):
+        r = client.post("/focus/start", json={"duration_minutes": 60, "locked": False})
+        assert r.status_code == 200
+        data = r.json()
+        assert "id" in data
+        assert data["locked"] is False
+
+    def test_focus_status(self, client):
+        client.post("/focus/start", json={"duration_minutes": 60, "locked": False})
+        r = client.get("/focus")
+        assert r.status_code == 200
+        assert r.json().get("locked") is False
+
+    def test_focus_end_unlocked(self, client):
+        start = client.post("/focus/start", json={"duration_minutes": 60, "locked": False}).json()
+        sid = start["id"]
+        r = client.delete(f"/focus/{sid}?force=false")
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+
+    def test_focus_end_locked_requires_force(self, client):
+        start = client.post("/focus/start", json={"duration_minutes": 60, "locked": True}).json()
+        sid = start["id"]
+        r = client.delete(f"/focus/{sid}?force=false")
+        assert r.json()["ok"] is False
+
+
+# ---------------------------------------------------------------------------
+# Intervention endpoints
+# ---------------------------------------------------------------------------
+
+
+class TestInterventionEndpoints:
+    """Tests for /intervention endpoints."""
+
+    def test_intervention_create(self, client):
+        r = client.post("/intervention", json={"kind": "math", "context": {}})
+        assert r.status_code == 200
+        data = r.json()
+        assert "id" in data
+        assert data["kind"] == "math"
+        assert "prompt" in data
+
+    def test_intervention_create_invalid_kind(self, client):
+        r = client.post("/intervention", json={"kind": "nonexistent", "context": {}})
+        assert r.status_code == 400
+
+    def test_intervention_get(self, client):
+        create = client.post("/intervention", json={"kind": "typing", "context": {}}).json()
+        r = client.get(f"/intervention/{create['id']}")
+        assert r.status_code == 200
+        assert r.json()["kind"] == "typing"
+
+    def test_intervention_get_missing(self, client):
+        r = client.get("/intervention/9999")
+        assert r.status_code == 404
+
+    def test_intervention_submit_typing_wrong(self, client):
+        create = client.post("/intervention", json={"kind": "typing", "context": {}}).json()
+        r = client.post(f"/intervention/{create['id']}/submit", json={"response": "wrong answer"})
+        assert r.status_code == 200
+        assert r.json()["passed"] is False
+
+    def test_intervention_submit_typing_correct(self, client):
+        create = client.post("/intervention", json={"kind": "typing", "context": {}}).json()
+        phrase = create["state"]["phrase"]
+        r = client.post(f"/intervention/{create['id']}/submit", json={"response": phrase})
+        assert r.json()["passed"] is True
+
+
+# ---------------------------------------------------------------------------
+# Stats endpoints (new)
+# ---------------------------------------------------------------------------
+
+
+class TestStatsEndpoints:
+    """Tests for /stats/* endpoints."""
+
+    def test_stats_score(self, client):
+        r = client.get("/stats/score")
+        assert r.status_code == 200
+        assert "score" in r.json()
+
+    def test_stats_breakdown(self, client):
+        r = client.get("/stats/breakdown")
+        assert r.status_code == 200
+        data = r.json()
+        assert "productive" in data
+        assert "distracting" in data
+
+    def test_stats_top_distractions(self, client):
+        r = client.get("/stats/top-distractions?days=7")
+        assert r.status_code == 200
+        assert isinstance(r.json(), list)
+
+    def test_stats_week(self, client):
+        r = client.get("/stats/week")
+        assert r.status_code == 200
+        assert r.json()["days"] == 7
+
+    def test_stats_month(self, client):
+        r = client.get("/stats/month")
+        assert r.status_code == 200
+        assert r.json()["days"] == 30
+
+
+# ---------------------------------------------------------------------------
+# Goals endpoints
+# ---------------------------------------------------------------------------
+
+
+class TestGoalsEndpoints:
+    """Tests for /goals endpoints."""
+
+    def test_goal_add(self, client):
+        r = client.post("/goals", json={
+            "name": "No social",
+            "target_type": "max_seconds",
+            "target_value": 1800,
+            "category": "social",
+        })
+        assert r.status_code == 200
+        assert "id" in r.json()
+
+    def test_goal_list(self, client):
+        client.post("/goals", json={
+            "name": "G1", "target_type": "zero", "target_value": 0, "category": "social"})
+        client.post("/goals", json={
+            "name": "G2", "target_type": "max_seconds", "target_value": 600, "category": None})
+        r = client.get("/goals")
+        assert r.status_code == 200
+        assert len(r.json()) == 2
+
+    def test_goal_remove(self, client):
+        gid = client.post("/goals", json={
+            "name": "Temp", "target_type": "zero", "target_value": 0, "category": None}).json()["id"]
+        r = client.delete(f"/goals/{gid}")
+        assert r.status_code == 200
+        assert len(client.get("/goals").json()) == 0
+
+    def test_goal_progress(self, client):
+        gid = client.post("/goals", json={
+            "name": "Social cap", "target_type": "max_seconds",
+            "target_value": 1800, "category": "social"}).json()["id"]
+        r = client.get(f"/goals/{gid}/progress")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["goal_id"] == gid
+        assert "met" in data
+
+    def test_goal_progress_missing(self, client):
+        r = client.get("/goals/9999/progress")
+        assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Activity decision endpoint
+# ---------------------------------------------------------------------------
+
+
+class TestActivityDecisionEndpoint:
+    """Tests for POST /activity/decision."""
+
+    def test_activity_decision_confirmed(self, client):
+        r = client.post("/activity/decision", json={
+            "url": "https://twitter.com/home",
+            "decision": "confirmed",
+        })
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+
+    def test_activity_decision_cancelled(self, client):
+        r = client.post("/activity/decision", json={
+            "url": "https://youtube.com/",
+            "decision": "cancelled",
+        })
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
