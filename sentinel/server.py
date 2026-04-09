@@ -444,6 +444,8 @@ class TriggerCreate(BaseModel):
 
 class TriggerAuthor(BaseModel):
     request: str
+    test: bool = True
+    max_revisions: int = 2
 
 
 @app.post("/triggers")
@@ -499,28 +501,57 @@ def triggers_run(name: str):
     return triggers_mod.run_once(get_conn(), name)
 
 
+@app.get("/triggers/{name}/runs")
+def triggers_runs(name: str, limit: int = 10):
+    return triggers_mod.list_runs(get_conn(), name, limit=limit)
+
+
+@app.get("/triggers/{name}/health")
+def triggers_health(name: str):
+    return triggers_mod.health(get_conn(), name)
+
+
 @app.post("/triggers/author")
 async def triggers_author(body: TriggerAuthor):
-    """Plain English → trigger recipe via internal Gemini agent. Saves it."""
+    """Plain English → trigger recipe via internal Gemini agent.
+
+    By default, also test-runs the recipe and asks the LLM to revise on
+    failure (up to body.max_revisions times). Set test=false to skip the
+    feedback loop and just author + store.
+    """
     import httpx
     c = get_conn()
     api_key = db.get_config(c, "gemini_api_key")
     if not api_key:
         raise HTTPException(400, "API key not set")
     try:
-        spec = await triggers_mod.author_from_text(api_key, body.request)
+        if body.test:
+            result = await triggers_mod.author_and_test(
+                c, api_key, body.request, max_revisions=body.max_revisions)
+            audit_mod.log_action(c, "trigger.author_and_test", {
+                "request": body.request, "ok": result["ok"],
+                "attempts": result["attempts"],
+                "name": (result.get("spec") or {}).get("name"),
+            })
+            if not result["ok"]:
+                raise HTTPException(422, {
+                    "message": "trigger failed test-run after revisions",
+                    "history": result["history"],
+                    "last_error": result.get("error"),
+                    "test_run": result.get("test_run"),
+                })
+            return result
+        else:
+            spec = await triggers_mod.author_from_text(api_key, body.request)
+            tid = triggers_mod.create(c, spec["name"], spec["recipe"],
+                                      interval_sec=int(spec.get("interval_sec", 300)),
+                                      description=spec.get("description", ""))
+            audit_mod.log_action(c, "trigger.author",
+                                 {"name": spec["name"], "request": body.request})
+            return {"ok": True, "id": tid, "spec": spec}
     except ValueError as e:
         raise HTTPException(400, f"author failed: {e}")
     except httpx.HTTPStatusError as e:
         raise HTTPException(502, f"LLM upstream error: {e.response.status_code}")
     except httpx.HTTPError as e:
         raise HTTPException(502, f"LLM network error: {e}")
-    try:
-        tid = triggers_mod.create(c, spec["name"], spec["recipe"],
-                                  interval_sec=int(spec.get("interval_sec", 300)),
-                                  description=spec.get("description", ""))
-    except ValueError as e:
-        raise HTTPException(400, f"validate failed: {e}")
-    audit_mod.log_action(c, "trigger.author",
-                         {"name": spec["name"], "request": body.request})
-    return {"id": tid, "spec": spec}

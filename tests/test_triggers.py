@@ -268,13 +268,29 @@ def test_run_once_block_domain_via_template(conn):
     assert blocker.is_blocked_domain("evil.example")
 
 
-def test_run_once_call_error_does_not_crash(conn):
+def test_run_once_call_failure_marks_run_failed(conn):
+    """A call returning {ok: false} now marks the whole run as failed."""
     triggers.create(conn, "err", {"steps": [
         {"call": "block_domain", "args": {}, "save_as": "r"},  # missing domain
     ]}, interval_sec=60)
     out = triggers.run_once(conn, "err")
-    assert out["status"] == "ok"
+    assert out["status"] == "error"
+    assert "block_domain" in out["failed_steps"]
     assert out["locals"]["r"]["ok"] is False
+    # Step log carries the failure detail
+    err_step = next(s for s in out["steps"] if s.get("call") == "block_domain")
+    assert err_step["status"] == "error"
+
+
+def test_run_once_exception_in_call_marks_failed(conn):
+    """If a call raises, the run is failed and the exception is captured."""
+    triggers.create(conn, "boom", {"steps": [
+        {"call": "kv_set", "args": {"namespace": "x", "key": "k", "value": 1}},
+    ]}, interval_sec=60)
+    with patch("sentinel.ai_store.kv_set", side_effect=RuntimeError("disk full")):
+        out = triggers.run_once(conn, "boom")
+    assert out["status"] == "error"
+    assert "disk full" in str(out["steps"])
 
 
 def test_run_once_nested_conditions(conn):
@@ -454,6 +470,248 @@ def test_author_from_text_rejects_missing_keys():
     with patch("sentinel.classifier.call_gemini", side_effect=fake):
         with pytest.raises(ValueError, match="missing keys"):
             asyncio.run(triggers.author_from_text("k", "x"))
+
+
+# --- Run history ---
+
+def test_run_history_records_each_run(conn):
+    triggers.create(conn, "rh", {"steps": [{"call": "now", "save_as": "t"}]},
+                    interval_sec=60)
+    triggers.run_once(conn, "rh")
+    triggers.run_once(conn, "rh")
+    triggers.run_once(conn, "rh")
+    runs = triggers.list_runs(conn, "rh")
+    assert len(runs) == 3
+    assert all(r["status"] == "ok" for r in runs)
+    # newest first
+    assert runs[0]["started_at"] >= runs[1]["started_at"] >= runs[2]["started_at"]
+
+
+def test_run_history_contains_steps_and_locals(conn):
+    triggers.create(conn, "rh2", {"steps": [
+        {"call": "kv_set", "args": {"namespace": "x", "key": "k", "value": 5}},
+        {"call": "kv_get", "args": {"namespace": "x", "key": "k"}, "save_as": "v"},
+    ]}, interval_sec=60)
+    triggers.run_once(conn, "rh2")
+    runs = triggers.list_runs(conn, "rh2")
+    assert runs[0]["locals"]["v"] == 5
+    calls = [s.get("call") for s in runs[0]["steps"] if s.get("type") == "call"]
+    assert calls == ["kv_set", "kv_get"]
+
+
+def test_run_history_capped_at_keep_limit(conn):
+    triggers.create(conn, "rh3", {"steps": [{"call": "now", "save_as": "t"}]},
+                    interval_sec=60)
+    for _ in range(triggers.RUN_HISTORY_KEEP + 5):
+        triggers.run_once(conn, "rh3")
+    runs = triggers.list_runs(conn, "rh3", limit=100)
+    assert len(runs) == triggers.RUN_HISTORY_KEEP
+
+
+def test_run_history_records_failures(conn):
+    triggers.create(conn, "rh4", {"steps": [
+        {"call": "block_domain", "args": {}},
+    ]}, interval_sec=60)
+    triggers.run_once(conn, "rh4")
+    runs = triggers.list_runs(conn, "rh4")
+    assert runs[0]["status"] == "error"
+    assert runs[0]["error"] is not None
+
+
+# --- Health ---
+
+def test_health_summary(conn):
+    triggers.create(conn, "h", {"steps": [{"call": "now", "save_as": "t"}]},
+                    interval_sec=60)
+    triggers.run_once(conn, "h")
+    triggers.run_once(conn, "h")
+    h = triggers.health(conn, "h")
+    assert h["runs_recorded"] == 2
+    assert h["failures"] == 0
+    assert h["success_rate"] == 1.0
+    assert h["last_ok_at"] is not None
+    assert h["last_error"] is None
+
+
+def test_health_tracks_failures(conn):
+    triggers.create(conn, "h2", {"steps": [{"call": "block_domain", "args": {}}]},
+                    interval_sec=60)
+    triggers.run_once(conn, "h2")
+    triggers.run_once(conn, "h2")
+    h = triggers.health(conn, "h2")
+    assert h["failures"] == 2
+    assert h["success_rate"] == 0.0
+    assert h["last_error"] is not None
+
+
+def test_health_no_runs(conn):
+    triggers.create(conn, "h3", {"steps": []}, interval_sec=60)
+    h = triggers.health(conn, "h3")
+    assert h["runs_recorded"] == 0
+    assert h["success_rate"] is None
+
+
+# --- LLM revision loop ---
+
+def test_author_and_test_succeeds_first_try(conn):
+    # First (and only) author returns a recipe that runs ok
+    spec = {
+        "name": "good_one",
+        "interval_sec": 60,
+        "description": "ok",
+        "recipe": {"steps": [{"call": "now", "save_as": "t"}]},
+    }
+    calls = []
+
+    async def fake_call(api_key, prompt, max_tokens=4000):
+        calls.append(prompt)
+        return json.dumps(spec)
+
+    db_mod.set_config(conn, "gemini_api_key", "fake")
+    import asyncio
+    with patch("sentinel.classifier.call_gemini", side_effect=fake_call):
+        result = asyncio.run(triggers.author_and_test(conn, "fake", "do a thing"))
+    assert result["ok"] is True
+    assert result["attempts"] == 1
+    assert result["spec"]["name"] == "good_one"
+    assert len(calls) == 1  # only the initial author, no revision
+    # Trigger persists
+    assert triggers.get(conn, "good_one") is not None
+
+
+def test_author_and_test_revises_on_failure(conn):
+    """First author fails (block_domain with empty domain), second pass fixes it."""
+    bad = {
+        "name": "broken",
+        "interval_sec": 60,
+        "description": "v1",
+        "recipe": {"steps": [{"call": "block_domain", "args": {"domain": ""}}]},
+    }
+    good = {
+        "name": "fixed",
+        "interval_sec": 60,
+        "description": "v2",
+        "recipe": {"steps": [{"call": "now", "save_as": "t"}]},
+    }
+    responses = [json.dumps(bad), json.dumps(good)]
+
+    async def fake_call(api_key, prompt, max_tokens=4000):
+        return responses.pop(0)
+
+    import asyncio
+    with patch("sentinel.classifier.call_gemini", side_effect=fake_call):
+        result = asyncio.run(triggers.author_and_test(conn, "fake", "block stuff"))
+    assert result["ok"] is True
+    assert result["attempts"] == 2
+    assert result["spec"]["name"] == "fixed"
+    # The broken draft was deleted; only the working one persists
+    assert triggers.get(conn, "broken") is None
+    assert triggers.get(conn, "fixed") is not None
+    # History records both attempts
+    assert len(result["history"]) == 2
+    assert result["history"][0]["status"] == "error"
+    assert result["history"][1]["status"] == "ok"
+
+
+def test_author_and_test_gives_up_after_max_revisions(conn):
+    """If every attempt fails, return ok=false with full history."""
+    bad = {
+        "name": "always_bad",
+        "interval_sec": 60,
+        "recipe": {"steps": [{"call": "block_domain", "args": {"domain": ""}}]},
+    }
+
+    async def fake_call(api_key, prompt, max_tokens=4000):
+        return json.dumps(bad)
+
+    import asyncio
+    with patch("sentinel.classifier.call_gemini", side_effect=fake_call):
+        result = asyncio.run(
+            triggers.author_and_test(conn, "fake", "x", max_revisions=2))
+    assert result["ok"] is False
+    assert result["attempts"] == 3
+    assert len(result["history"]) == 3
+    assert all(h["status"] == "error" for h in result["history"])
+
+
+def test_author_and_test_handles_create_failure(conn):
+    """First spec passes validation but fails at create() (e.g. interval too low).
+    The revision loop must not crash even though there's no run to learn from.
+    """
+    # interval_sec=2 is below the floor of 5 → create() raises
+    bad = {
+        "name": "interval_too_low",
+        "interval_sec": 2,
+        "recipe": {"steps": [{"call": "now", "save_as": "t"}]},
+    }
+    good = {
+        "name": "interval_fixed",
+        "interval_sec": 60,
+        "recipe": {"steps": [{"call": "now", "save_as": "t"}]},
+    }
+    responses = [json.dumps(bad), json.dumps(good)]
+
+    async def fake_call(api_key, prompt, max_tokens=4000):
+        return responses.pop(0)
+
+    import asyncio
+    with patch("sentinel.classifier.call_gemini", side_effect=fake_call):
+        result = asyncio.run(triggers.author_and_test(conn, "fake", "x"))
+    assert result["ok"] is True
+    assert result["attempts"] == 2
+    # The revision phase saw the create error, not a run error
+    assert result["history"][0]["phase"] == "create"
+
+
+def test_author_and_test_handles_invalid_json(conn):
+    """First LLM response is malformed; revision recovers."""
+    good = {
+        "name": "after_garbage",
+        "interval_sec": 60,
+        "recipe": {"steps": [{"call": "now", "save_as": "t"}]},
+    }
+    responses = ["this is not JSON at all", json.dumps(good)]
+
+    async def fake_call(api_key, prompt, max_tokens=4000):
+        return responses.pop(0)
+
+    import asyncio
+    with patch("sentinel.classifier.call_gemini", side_effect=fake_call):
+        result = asyncio.run(triggers.author_and_test(conn, "fake", "x"))
+    assert result["ok"] is True
+    assert result["history"][0]["phase"] == "author"
+    assert result["history"][0]["status"] == "error"
+
+
+def test_author_and_test_revision_prompt_contains_error(conn):
+    """Verify the LLM is told what went wrong on the second call."""
+    bad = {
+        "name": "v1",
+        "interval_sec": 60,
+        "recipe": {"steps": [{"call": "block_domain", "args": {"domain": ""}}]},
+    }
+    good = {
+        "name": "v2",
+        "interval_sec": 60,
+        "recipe": {"steps": [{"call": "now", "save_as": "t"}]},
+    }
+    prompts_seen = []
+    responses = [json.dumps(bad), json.dumps(good)]
+
+    async def fake_call(api_key, prompt, max_tokens=4000):
+        prompts_seen.append(prompt)
+        return responses.pop(0)
+
+    import asyncio
+    with patch("sentinel.classifier.call_gemini", side_effect=fake_call):
+        asyncio.run(triggers.author_and_test(conn, "fake", "do thing"))
+    # Second prompt is the revision prompt and references the failure
+    assert len(prompts_seen) == 2
+    revision = prompts_seen[1]
+    assert "block_domain" in revision
+    assert "step(s) failed" in revision or "failed" in revision.lower()
+    # Original request is preserved through the revision
+    assert "do thing" in revision
 
 
 def test_author_from_text_validates_recipe():

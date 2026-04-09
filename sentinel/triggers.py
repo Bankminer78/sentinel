@@ -54,6 +54,22 @@ def _ensure_table(conn):
         created_at REAL
     )""")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_triggers_enabled ON agent_triggers(enabled)")
+    # Per-run history — capped to RUN_HISTORY_KEEP rows per trigger.
+    conn.execute("""CREATE TABLE IF NOT EXISTS agent_trigger_runs (
+        id INTEGER PRIMARY KEY,
+        trigger_name TEXT NOT NULL,
+        started_at REAL NOT NULL,
+        duration_ms REAL,
+        status TEXT,
+        error TEXT,
+        locals TEXT,
+        steps TEXT
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_trigger_runs_name "
+                 "ON agent_trigger_runs(trigger_name, started_at DESC)")
+
+
+RUN_HISTORY_KEEP = 20  # rows per trigger
 
 
 # --- CRUD ---
@@ -358,51 +374,182 @@ def list_calls() -> dict:
 
 # --- Execution ---
 
-def _execute_steps(conn, steps: list, locals_dict: dict, ctx: dict, depth: int = 0):
+def _step_status(result: Any) -> str:
+    """Detect failure in a step's result. {error: ...} or {ok: false} → error."""
+    if isinstance(result, dict):
+        if "error" in result:
+            return "error"
+        if result.get("ok") is False:
+            return "error"
+    return "ok"
+
+
+def _summarize(value: Any, max_len: int = 200) -> str:
+    """Compact JSON of a value, truncated for run-log storage."""
+    try:
+        s = json.dumps(value, default=str)
+    except Exception:
+        s = str(value)
+    return s if len(s) <= max_len else s[:max_len] + "…"
+
+
+def _execute_steps(conn, steps: list, locals_dict: dict, ctx: dict,
+                   depth: int = 0, run_log: list | None = None) -> list:
+    if run_log is None:
+        run_log = []
     if depth > 8:
-        return
+        run_log.append({"type": "error", "error": "max nesting depth exceeded"})
+        return run_log
     for step in steps:
         if "when" in step:
-            if not _evaluate_condition(step["when"], locals_dict):
+            try:
+                passed = _evaluate_condition(step["when"], locals_dict)
+            except Exception as e:
+                run_log.append({"type": "when", "var": step["when"].get("var"),
+                                "status": "error", "error": str(e)})
                 continue
-            if "do" in step:
-                _execute_steps(conn, step["do"], locals_dict, ctx, depth + 1)
-                continue
+            run_log.append({"type": "when", "var": step["when"].get("var"),
+                            "op": step["when"].get("op"), "passed": passed})
+            if passed and "do" in step:
+                _execute_steps(conn, step["do"], locals_dict, ctx, depth + 1, run_log)
+            continue
         if "call" in step:
-            fn = CALLS.get(step["call"])
+            call_name = step["call"]
+            fn = CALLS.get(call_name)
             if not fn:
+                run_log.append({"type": "call", "call": call_name,
+                                "status": "error", "error": "unknown call"})
                 continue
-            args = _substitute(step.get("args", {}) or {}, locals_dict)
+            try:
+                args = _substitute(step.get("args", {}) or {}, locals_dict)
+            except Exception as e:
+                run_log.append({"type": "call", "call": call_name,
+                                "status": "error", "error": f"arg substitution: {e}"})
+                continue
             try:
                 result = fn(conn, args, ctx)
+                step_status = _step_status(result)
+                entry = {"type": "call", "call": call_name, "status": step_status,
+                         "result": _summarize(result)}
+                if step_status == "error":
+                    if isinstance(result, dict):
+                        entry["error"] = result.get("error") or result.get("reason") or "step returned ok=false"
+                run_log.append(entry)
             except Exception as e:
-                result = {"error": str(e)}
+                result = {"error": f"{type(e).__name__}: {e}"}
+                run_log.append({"type": "call", "call": call_name,
+                                "status": "error", "error": result["error"]})
             save_as = step.get("save_as")
             if save_as:
                 locals_dict[save_as] = result
+    return run_log
+
+
+def _record_run(conn, name: str, started_at: float, duration_ms: float,
+                status: str, error: str | None, locals_dict: dict, run_log: list):
+    conn.execute(
+        "INSERT INTO agent_trigger_runs "
+        "(trigger_name, started_at, duration_ms, status, error, locals, steps) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (name, started_at, duration_ms, status, error,
+         json.dumps(locals_dict, default=str)[:5000],
+         json.dumps(run_log, default=str)[:5000]))
+    # Trim to last RUN_HISTORY_KEEP rows for this trigger.
+    conn.execute(
+        "DELETE FROM agent_trigger_runs WHERE trigger_name=? AND id NOT IN "
+        "(SELECT id FROM agent_trigger_runs WHERE trigger_name=? "
+        " ORDER BY started_at DESC LIMIT ?)",
+        (name, name, RUN_HISTORY_KEEP))
+    conn.commit()
 
 
 def run_once(conn, name: str) -> dict:
-    """Execute a trigger immediately. Returns step locals + status."""
+    """Execute a trigger immediately. Returns locals, step log, and status.
+
+    Status is "ok" only if zero steps failed. A step fails if its call raised,
+    returned ``{"error": ...}``, or returned ``{"ok": false, ...}``.
+    """
     _ensure_table(conn)
     t = get(conn, name)
     if not t:
-        return {"error": "not found"}
+        return {"status": "error", "error": "not found", "locals": {}, "steps": []}
     locals_dict: dict = {}
     ctx = {"name": name, "trigger_id": t["id"]}
-    status = "ok"
-    err = None
+    started = time.time()
+    fatal_err = None
+    run_log: list = []
     try:
-        _execute_steps(conn, t["recipe"].get("steps", []), locals_dict, ctx)
+        run_log = _execute_steps(conn, t["recipe"].get("steps", []), locals_dict, ctx)
     except Exception as e:
-        status = "error"
-        err = f"{type(e).__name__}: {e}"
+        fatal_err = f"{type(e).__name__}: {e}"
         traceback.print_exc()
+    duration_ms = (time.time() - started) * 1000
+    failed_steps = [s for s in run_log if s.get("status") == "error"]
+    if fatal_err:
+        status = "error"
+        error_msg = fatal_err
+    elif failed_steps:
+        status = "error"
+        error_msg = (f"{len(failed_steps)} step(s) failed: " +
+                     ", ".join(f"{s.get('call') or s.get('type')}({s.get('error','')})"
+                               for s in failed_steps[:3]))
+    else:
+        status = "ok"
+        error_msg = None
+    _record_run(conn, name, started, duration_ms, status, error_msg, locals_dict, run_log)
     conn.execute(
         "UPDATE agent_triggers SET last_run=?, last_status=?, last_result=? WHERE name=?",
-        (time.time(), status if not err else err, json.dumps(locals_dict, default=str), name))
+        (started, error_msg or "ok", json.dumps(locals_dict, default=str), name))
     conn.commit()
-    return {"status": status, "error": err, "locals": locals_dict}
+    return {
+        "status": status,
+        "error": error_msg,
+        "locals": locals_dict,
+        "steps": run_log,
+        "failed_steps": [s.get("call") or s.get("type") for s in failed_steps],
+        "duration_ms": duration_ms,
+    }
+
+
+def list_runs(conn, name: str, limit: int = 10) -> list:
+    """Recent run history for a trigger, newest first."""
+    _ensure_table(conn)
+    rows = conn.execute(
+        "SELECT * FROM agent_trigger_runs WHERE trigger_name=? "
+        "ORDER BY started_at DESC LIMIT ?",
+        (name, limit)).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        for k in ("locals", "steps"):
+            if d.get(k):
+                try:
+                    d[k] = json.loads(d[k])
+                except Exception:
+                    pass
+        out.append(d)
+    return out
+
+
+def health(conn, name: str) -> dict:
+    """Quick health summary: recent run counts, last error, last ok time."""
+    _ensure_table(conn)
+    rows = conn.execute(
+        "SELECT status, started_at, error FROM agent_trigger_runs "
+        "WHERE trigger_name=? ORDER BY started_at DESC LIMIT ?",
+        (name, RUN_HISTORY_KEEP)).fetchall()
+    total = len(rows)
+    failures = sum(1 for r in rows if r["status"] == "error")
+    last_error = next((r["error"] for r in rows if r["status"] == "error"), None)
+    last_ok_at = next((r["started_at"] for r in rows if r["status"] == "ok"), None)
+    return {
+        "name": name,
+        "runs_recorded": total,
+        "failures": failures,
+        "success_rate": (total - failures) / total if total else None,
+        "last_error": last_error,
+        "last_ok_at": last_ok_at,
+    }
 
 
 def due_triggers(conn) -> list:
@@ -538,3 +685,138 @@ async def author_from_text(api_key: str, request: str) -> dict:
         raise ValueError(f"LLM output missing keys: {obj}")
     validate_recipe(obj["recipe"])
     return obj
+
+
+REVISE_PROMPT = """You authored a recipe that failed when test-run. Fix it.
+
+ORIGINAL USER REQUEST: "{request}"
+
+PRIOR ATTEMPT: {prior_spec}
+
+WHAT HAPPENED ON RUN:
+- run status: {run_status}
+- error summary: {error}
+- step log (in order, with results truncated): {steps}
+- final locals (after all steps): {locals}
+
+Common bugs to check first:
+- Compared a wrapper dict instead of an inner field (e.g. condition var "score" but get_score returns {{score: float}}, so use "score.score").
+- Template ${{var.path}} produced an empty string because the path was wrong — verify each var path against the actual return shape.
+- Used a call name that doesn't exist.
+- {{ok: false, reason: ...}} from a call means args were wrong (e.g. missing/empty domain).
+- A `when` clause never fires because the comparison value type doesn't match (string vs int).
+
+AVAILABLE OPERATIONS (with shapes):
+{calls}
+
+DSL reminder:
+- step: {{"call": "op_name", "args": {{...}}, "save_as": "varname"}}
+- condition: {{"when": {{"var": "name.path", "op": "equals|not_equals|gt|gte|lt|lte|in|contains|truthy|falsy", "value": ...}}, "do": [steps...]}}
+- templates: ${{varname.path}} inside string args interpolates prior step results
+
+Return ONLY a corrected JSON object of the same shape:
+{{
+  "name": "snake_case_unique_name",
+  "interval_sec": <int>,
+  "description": "<one sentence>",
+  "recipe": {{"steps": [...]}}
+}}
+No markdown, no explanation."""
+
+
+async def _revise_from_failure(api_key: str, request: str, prior_spec: dict | None,
+                               failure: dict) -> dict:
+    """Ask the LLM to fix a recipe given a structured failure record.
+
+    failure may come from any phase: author/parse, validate, create, or run.
+    """
+    from . import classifier
+    calls_desc = "\n".join(f"- {k}: {v}" for k, v in list_calls().items())
+    prompt = REVISE_PROMPT.format(
+        request=request,
+        prior_spec=json.dumps(prior_spec or {}, default=str)[:2000],
+        run_status=failure.get("phase", "unknown") + "/" + str(failure.get("status", "")),
+        error=str(failure.get("error"))[:500],
+        steps=json.dumps(failure.get("steps", []), default=str)[:2500],
+        locals=json.dumps(failure.get("locals", {}), default=str)[:1500],
+        calls=calls_desc,
+    )
+    raw = await classifier.call_gemini(api_key, prompt, max_tokens=4000)
+    raw = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    obj = json.loads(raw)
+    if not all(k in obj for k in ("name", "interval_sec", "recipe")):
+        raise ValueError(f"revision missing keys: {obj}")
+    validate_recipe(obj["recipe"])
+    return obj
+
+
+async def author_and_test(conn, api_key: str, request: str,
+                          max_revisions: int = 2) -> dict:
+    """Author → test-run → revise loop. Returns the working trigger or fails.
+
+    Failure feedback works for every phase the agent might botch:
+    - LLM returns invalid JSON or wrong shape
+    - validate_recipe rejects an unknown call / op / depth
+    - create() rejects (e.g. interval too low, name empty)
+    - run_once detects a step that returned ok=false or raised
+    """
+    history = []
+    spec: dict | None = None
+    last_failure: dict | None = None
+    last_run: dict | None = None
+
+    for attempt in range(max_revisions + 1):
+        # Author or revise
+        try:
+            if attempt == 0:
+                spec = await author_from_text(api_key, request)
+            else:
+                spec = await _revise_from_failure(api_key, request, spec, last_failure or {})
+        except (ValueError, json.JSONDecodeError) as e:
+            last_failure = {"phase": "author", "status": "error", "error": str(e)}
+            history.append({"attempt": attempt, **last_failure})
+            continue
+
+        # Persist
+        try:
+            create(conn, spec["name"], spec["recipe"],
+                   interval_sec=int(spec.get("interval_sec", 300)),
+                   description=spec.get("description", ""))
+        except ValueError as e:
+            last_failure = {"phase": "create", "status": "error",
+                            "error": str(e), "prior_spec": spec}
+            history.append({"attempt": attempt, "phase": "create",
+                            "status": "error", "error": str(e),
+                            "spec_name": spec.get("name")})
+            continue
+
+        # Test-run
+        last_run = run_once(conn, spec["name"])
+        history.append({
+            "attempt": attempt, "phase": "run", "status": last_run["status"],
+            "error": last_run.get("error"),
+            "spec_name": spec.get("name"),
+        })
+
+        if last_run["status"] == "ok":
+            return {
+                "ok": True, "spec": spec, "test_run": last_run,
+                "attempts": attempt + 1, "history": history,
+            }
+
+        # Run failed — capture full diagnostics for the next revision
+        last_failure = {
+            "phase": "run", "status": "error",
+            "error": last_run.get("error"),
+            "steps": last_run.get("steps", []),
+            "locals": last_run.get("locals", {}),
+        }
+        # Delete this draft unless it's our last shot
+        if attempt < max_revisions:
+            delete(conn, spec["name"])
+
+    return {
+        "ok": False, "spec": spec, "test_run": last_run,
+        "attempts": max_revisions + 1, "history": history,
+        "error": (last_failure or {}).get("error") or "all attempts failed",
+    }
