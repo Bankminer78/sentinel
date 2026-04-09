@@ -1,0 +1,22 @@
+[project]
+name = "sentinel"
+version = "0.1.0"
+description = "AI-native accountability app"
+requires-python = ">=3.10"
+dependencies = [
+    "click",
+    "uvicorn",
+    "fastapi",
+    "httpx",
+    "pyobjc-framework-Cocoa",
+]
+
+[project.scripts]
+sentinel = "sentinel.cli:cli"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
