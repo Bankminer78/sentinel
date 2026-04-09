@@ -1,0 +1,44 @@
+{
+  "manifest_version": 2,
+  "name": "Sentinel",
+  "version": "0.1.0",
+  "description": "Sentinel browser monitor — reports page visits and enforces blocks.",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "tabs",
+    "<all_urls>",
+    "http://localhost:9849/*"
+  ],
+  "background": {
+    "scripts": ["background.js"],
+    "persistent": false
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "browser_action": {
+    "default_popup": "popup.html",
+    "default_title": "Sentinel",
+    "default_icon": {
+      "16": "icon16.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
+  "applications": {
+    "gecko": {
+      "id": "sentinel@sentinel.local",
+      "strict_min_version": "78.0"
+    }
+  }
+}

@@ -59,6 +59,7 @@ from . import (
     snapshots as snapshots_mod,
     recovery as recovery_mod,
     sharing as sharing_mod,
+    mobile_ui as mobile_ui_mod,
 )
 import asyncio
 
@@ -1097,6 +1098,12 @@ def export_stats_csv(days: int = 30):
 def export_activity_csv(days: int = 7):
     from fastapi.responses import PlainTextResponse
     return PlainTextResponse(export_formats_mod.activity_to_csv(get_conn(), days=days), media_type="text/csv")
+
+
+@app.get("/mobile", response_class=HTMLResponse)
+def mobile_dashboard():
+    """Mobile-optimized dashboard."""
+    return HTMLResponse(content=mobile_ui_mod.get_mobile_dashboard())
 
 
 @app.get("/export/report.md")
