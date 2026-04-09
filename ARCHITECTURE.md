@@ -1,8 +1,10 @@
 # Sentinel Architecture
 
-The world's first AI-native accountability app. Every feature is powered by or enhanced by LLMs.
+The world's first AI-native accountability app. Every feature is powered by or enhanced by an LLM.
 
-**Design principles**: Minimal code (Python, fewer lines for more features). LLM-native (natural language in, structured behavior out). Text-first (CLI + browser extension now, GUI later). macOS first, cross-platform later.
+**Design principles**: Minimal code (Python, fewer lines for more features). LLM-native (natural language in, structured behavior out). Text-first (CLI + browser extension now, GUI later). Local-first — your data stays on your machine.
+
+**Current state**: 71 modules · 1387 tests (passing in ~2.3s) · 8227 lines of Python.
 
 ---
 
@@ -14,84 +16,158 @@ The world's first AI-native accountability app. Every feature is powered by or e
                           +--------+---------+
                                    |
 +---------------------+   +--------v---------+   +------------------+
-| Browser Extension   +-->|   Core Engine    +-->| Block Enforcer   |
-| (Chrome/Arc)        |   |   (FastAPI)      |   | - /etc/hosts     |
-+---------------------+   +--------+---------+   | - pf firewall    |
-                                   |              | - process killer |
-                          +--------v---------+   +------------------+
+| Browser Extension   +-->|   FastAPI server +-->| Block enforcer   |
+| (Chrome MV3 / Arc)  |   |   localhost:9849 |   | /etc/hosts + kill|
++---------------------+   +--------+---------+   +------------------+
+                                   |
+                          +--------v---------+
                           |  LLM Classifier  |
                           |  (Gemini Flash)  |
                           +--------+---------+
                                    |
-                          +--------v---------+
-                          |  SQLite Database |
-                          +------------------+
+                          +--------v---------+      +-----------------+
+                          |  SQLite (local)  +<---->+  Realtime SSE   |
+                          +------------------+      +-----------------+
 ```
 
-All communication between the browser extension and the core engine happens over `localhost` HTTP. The core engine runs as a LaunchDaemon for persistence.
+All inter-process communication is over `localhost` HTTP. The daemon is the enforcer; the CLI and extension are interfaces. Separation ensures blocking persists even if the user deletes the app directory.
 
 ---
 
-## File Structure
+## Module map (71 modules)
 
-```
-sentinel/
-  sentinel/
-    __init__.py
-    main.py                 # CLI entry point (click)
-    server.py               # FastAPI server (localhost:9849)
-    db.py                   # SQLite models + migrations
-    config.py               # Settings, API key, preferences
+Every module lives at `sentinel/<name>.py`. Tests live at `tests/test_<name>.py`. The codebase is intentionally flat — one file per concept.
 
-    engine/
-      __init__.py
-      rules.py              # Rule engine — NL rules -> structured conditions via LLM
-      monitor.py            # Activity monitor — foreground app, window title, URL
-      classifier.py         # LLM classifier — classifies activity against rules
-      enforcer.py           # Block enforcer — kills apps, edits /etc/hosts, pf rules
-      scheduler.py          # Time-based rule activation, break allowances
+### Core engine (8)
+| Module | Purpose |
+|---|---|
+| `server.py` | FastAPI app, request routing, lifecycle |
+| `db.py` | SQLite schema, migrations, query helpers |
+| `cli.py` | `click` CLI — 100+ commands across all features |
+| `client.py` | LLM client (Gemini Flash) with caching and retries |
+| `monitor.py` | Foreground app, window title, browser URL polling |
+| `blocker.py` | Block enforcement: `/etc/hosts`, DNS flush, process kill |
+| `classifier.py` | LLM classifier — verdicts on every activity change |
+| `nlp.py` | Natural-language rule parsing |
 
-    llm/
-      __init__.py
-      client.py             # Gemini Flash client (user-provided API key)
-      prompts.py            # All LLM prompts (rule parsing, classification, negotiation)
+### Blocking (5)
+| Module | Purpose |
+|---|---|
+| `whitelist.py` | Whitelist mode — block everything except allowed |
+| `lockdown.py` | Hard lockdown with password gate and timer |
+| `skiplist.py` | 60+ utility domains never sent to the LLM |
+| `limits.py` | Per-category time budgets (daily/weekly) |
+| `triggers.py` | Event-driven rule activation |
 
-    interventions/
-      __init__.py
-      countdown.py          # 5-second countdown before block
-      friction.py           # Breathing exercises, typing challenges
-      negotiation.py        # AI negotiation to earn unblock time
-      photo_proof.py        # Photo proof of task completion
+### Scheduling (5)
+| Module | Purpose |
+|---|---|
+| `scheduler.py` | Time-of-day, day-of-week rule activation |
+| `focus_modes.py` | Locked and soft focus blocks |
+| `mode.py` | Global modes: work, weekend, vacation, custom |
+| `calendar.py` | iCal sync, in-meeting detection |
+| `rituals.py` | Daily rituals and routines |
 
-    accountability/
-      __init__.py
-      penalties.py          # Financial penalties (Stripe integration)
-      partners.py           # Accountability partner notifications
-      stats.py              # Usage statistics, productivity scoring
+### Interventions (3)
+| Module | Purpose |
+|---|---|
+| `interventions.py` | Countdown, breathing, typing, math, AI negotiation, photo proof |
+| `coach.py` | Conversational nudges and unblock negotiation |
+| `motivation.py` | Motivational content delivery |
 
-  extension/
-    manifest.json           # Chrome MV3 manifest
-    background.js           # Service worker — manages state, talks to core engine
-    content.js              # Content script — monitors URLs, injects overlays
-    overlay.html            # Blocking overlay with countdown
-    overlay.css
+### Gamification (5)
+| Module | Purpose |
+|---|---|
+| `achievements.py` | Achievement definitions, unlock checks |
+| `points.py` | XP and level math |
+| `challenges.py` | User-created and system challenges |
+| `leaderboard.py` | Local and shared leaderboards |
+| `commitments.py` | Commitments with deadlines and stakes |
 
-  daemon/
-    com.sentinel.daemon.plist   # LaunchDaemon config
-    install.sh                  # Installs daemon, sets permissions
-    uninstall.sh
+### Tracking (6)
+| Module | Purpose |
+|---|---|
+| `habits.py` | Habit definitions, streaks, frequency |
+| `journal.py` | Journal entries, mood, tags, AI search |
+| `tracker.py` | Time tracking by project |
+| `journeys.py` | Multi-step journeys with milestones |
+| `checkins.py` | Daily and ad-hoc check-ins |
+| `timeline.py` | Aggregated activity timeline |
 
-  pyproject.toml
-  Makefile                  # install, dev, test, build
-```
+### Intelligence (10)
+| Module | Purpose |
+|---|---|
+| `profile.py` | User profile inferred from behavior |
+| `forecasting.py` | Behavioral forecasting |
+| `correlations.py` | Discovers correlations between tracked variables |
+| `experiments.py` | Self-experiments with measurable hypotheses |
+| `patterns.py` | Pattern detection across activity history |
+| `reports.py` | Daily, weekly, peak-hours, triggers |
+| `digest.py` | Daily and weekly summary digests |
+| `query.py` | Structured queries against your data |
+| `smart.py` | Rule duplicate / conflict / coverage analysis |
+| `stats.py` | Productivity scoring, top apps, top domains |
+
+### Integrations (8)
+| Module | Purpose |
+|---|---|
+| `notifications.py` | Notification fan-out (Slack, Discord, etc.) |
+| `email_notif.py` | Email notifications |
+| `sms.py` | SMS via Twilio |
+| `webhooks.py` | Outbound webhooks |
+| `ical_export.py` | iCal feed export |
+| `voice.py` | Voice command parsing |
+| `sharing.py` | Sharing rule packs and templates |
+| `partners.py` | Accountability partners (notified on bypass) |
+
+### Privacy and security (5)
+| Module | Purpose |
+|---|---|
+| `privacy.py` | Three privacy levels (open / private / paranoid) |
+| `encryption.py` | Local encryption at rest |
+| `sensitivity.py` | PII redaction before LLM calls |
+| `audit.py` | Append-only audit log |
+| `penalties.py` | Financial penalties on bypass |
+
+### Persistence and lifecycle (6)
+| Module | Purpose |
+|---|---|
+| `persistence.py` | Daemon lifecycle helpers |
+| `backup.py` | Encrypted backup |
+| `sync.py` | Multi-device sync |
+| `undo.py` | Undo for destructive actions |
+| `importer.py` | Import rules and data |
+| `export_formats.py` | CSV, Markdown, HTML exports |
+
+### Dashboard and UX (6)
+| Module | Purpose |
+|---|---|
+| `dashboard.py` | Web dashboard routes |
+| `realtime.py` | Server-Sent Events stream |
+| `health.py` | Health check endpoint |
+| `onboarding.py` | First-run setup, persona presets |
+| `templates.py` | Rule pack templates (deep-work, etc.) |
+| `tags.py` | Tagging across rules and entries |
+
+### Context and observability (4)
+| Module | Purpose |
+|---|---|
+| `context.py` | Active context the LLM sees |
+| `environment.py` | Environment detection (network, location, device) |
+| `screenshots.py` | Optional screenshot capture (privacy-gated) |
+| `alerts.py` | Threshold alerts and warnings |
 
 ---
 
-## Component Details
+## Component details
 
-### Rule Engine (`engine/rules.py`)
+### LLM classifier (`classifier.py` + `client.py`)
 
-Natural language rules are sent to Gemini Flash and parsed into structured conditions.
+On every activity change, Sentinel sends the activity plus the active rule set to Gemini Flash and gets a verdict back: `allow`, `warn`, or `block`. Multiple rules are batched into a single call. Verdicts are cached for 60 seconds per `(activity, rule_set)` tuple. Domain categories are cached permanently.
+
+Estimated cost: under $0.10/day for typical use.
+
+### Natural-language rules (`nlp.py`)
 
 ```
 User input:  "Don't let me watch YouTube during work hours"
@@ -104,183 +180,152 @@ LLM output:  {
 }
 ```
 
-Rules are stored in SQLite and evaluated by the classifier in real-time. Context-aware: the same domain (e.g., reddit.com/r/programming vs reddit.com/r/funny) can be productive or distracting depending on the rule.
+Parsed rules are stored in SQLite. The classifier evaluates them in real time and is context-aware — `reddit.com/r/programming` and `reddit.com/r/funny` get different verdicts under the same rule.
 
-### Activity Monitor (`engine/monitor.py`)
+### Activity monitor (`monitor.py`)
 
-Polls every 1 second via macOS APIs:
-- **Foreground app**: `NSWorkspace.sharedWorkspace().frontmostApplication()`
-- **Window title**: Accessibility API (`AXUIElementCopyAttributeValue`)
-- **Browser URL**: Received from browser extension via HTTP
+Polls every 1 second:
+- **Foreground app** via `NSWorkspace.sharedWorkspace().frontmostApplication()`
+- **Window title** via the Accessibility API (`AXUIElementCopyAttributeValue`)
+- **Browser URL** received from the browser extension over HTTP
 
-Activity is logged to SQLite for stats. Only the last 30 days are kept.
+Activity is logged to SQLite. Only the last 30 days are retained.
 
-### LLM Classifier (`engine/classifier.py`)
+### Block enforcer (`blocker.py`)
 
-On every activity change, the classifier sends the current activity + active rules to Gemini Flash. The LLM returns a verdict: `allow`, `warn`, or `block`.
+Three layers, hardest to bypass:
+1. **Process killing** — `kill -9` on blocked app PIDs, re-killed on respawn
+2. **DNS blocking** — `/etc/hosts` rewrites pointing to `127.0.0.1`, plus DNS cache flush
+3. **Firewall blocking** — `pf` rules for IPs of blocked domains
 
-Batching: multiple rules are evaluated in a single LLM call. Response is cached per (activity, rule_set) tuple for 60 seconds to minimize API costs.
+Requires `sudo`, granted once during install via the LaunchDaemon.
 
-For ambiguous cases (context-aware blocking), the classifier considers page title, URL path, and content summary from the browser extension.
+### Interventions (`interventions.py`)
 
-### Block Enforcer (`engine/enforcer.py`)
-
-Three-layer blocking (hardest to bypass):
-
-1. **Process killing**: `kill -9` on blocked app PIDs. Re-kills on respawn (polled every 1s).
-2. **DNS blocking**: Writes blocked domains to `/etc/hosts` pointing to `127.0.0.1`.
-3. **Firewall blocking**: `pf` (packet filter) rules to block IPs associated with blocked domains.
-
-Requires `sudo` — granted once during installation via the LaunchDaemon.
-
-### Persistence Daemon (`daemon/`)
-
-A macOS LaunchDaemon (`com.sentinel.daemon.plist`) that:
-- Starts on boot before user login
-- Restarts if killed
-- Re-applies `/etc/hosts` and `pf` rules if tampered with
-- Survives app deletion (daemon lives in `/Library/LaunchDaemons/`)
-
-The daemon is the enforcer. The CLI and server are the interface. Separation ensures blocking persists even if the user deletes the app directory.
-
-### Browser Extension (`extension/`)
-
-Chrome Manifest V3 extension (compatible with Arc):
-
-- **Content script** runs on every page. Sends the current URL and page title to `http://localhost:9849/activity` every second.
-- **Blocking overlay**: When the core engine returns `block`, the content script injects a full-page overlay with a 5-second countdown, then redirects to a blocked page. Reuses the proven Cold Turkey overlay pattern.
-- **Content sampling**: For context-aware rules, the content script sends a summary of visible text to help the classifier distinguish productive vs. distracting content.
-
-### Interventions
-
-Before hard-blocking, Sentinel offers friction-based interventions:
+Friction before hard-blocking:
 
 | Intervention | Description |
 |---|---|
-| **Countdown** | 5-second warning overlay. User can back out voluntarily. |
-| **Breathing** | Guided breathing exercise (10-30s) before allowing access. |
-| **Typing challenge** | Type a phrase like "I am choosing distraction over my goals." |
-| **AI negotiation** | Chat with the LLM to justify why you need access. LLM can grant 5-15 min. |
-| **Photo proof** | Upload a photo proving you completed a task before unblocking. |
+| Countdown | 5-second warning overlay |
+| Breathing | Guided breathing exercise (10–30s) |
+| Typing | Type a phrase like "I am choosing distraction over my goals" |
+| Math | Solve a problem proportional to your block-bypass history |
+| AI negotiation | Chat with the LLM to earn 5–15 minutes |
+| Photo proof | Upload a photo proving task completion |
 
-Each rule can specify which interventions to apply and in what order.
+Each rule specifies which interventions to apply and in what order.
 
-### CLI Interface
+### Intelligence layer (`forecasting.py`, `correlations.py`, `experiments.py`, `patterns.py`, `profile.py`, `reports.py`)
 
-```
-sentinel add "No Twitter except during lunch (12-1pm)"
-sentinel add "Block all games on weekdays" --penalty 5.00
-sentinel status                  # active rules, current activity
-sentinel stats                   # today's productivity score, time wasted
-sentinel stats --week            # weekly breakdown
-sentinel config --api-key KEY    # set Gemini API key
-sentinel config --partner EMAIL  # add accountability partner
-sentinel pause 15m               # pause all blocking for 15 min (requires intervention)
-sentinel remove <rule-id>        # remove a rule (requires intervention if locked)
-```
+The LLM doesn't just classify — it reasons over your history. The intelligence modules turn weeks of activity into:
+- A behavioral profile
+- Tomorrow's forecast
+- Discovered correlations (sleep vs focus, mood vs distraction)
+- Running self-experiments
+- Daily and weekly narratives
 
-Built with `click`. The CLI talks to the FastAPI server on `localhost:9849`.
+`sentinel ask "..."` is a thin wrapper that hands the LLM a summarized, PII-redacted view of these and lets you ask anything in plain English.
 
----
+### Privacy (`privacy.py`, `encryption.py`, `sensitivity.py`, `audit.py`)
 
-## Data Model (SQLite)
+Three levels:
+- **open** — full activity logged, anything in prompts
+- **private** — PII redacted before any LLM call (emails, names, secrets)
+- **paranoid** — local LLM only, no outbound traffic, encrypted at rest
 
-```sql
-rules
-  id            INTEGER PRIMARY KEY
-  natural_text  TEXT        -- original user input
-  parsed_json   TEXT        -- LLM-structured conditions
-  action        TEXT        -- block | warn | friction
-  intervention  TEXT        -- countdown | breathing | typing | negotiate | photo
-  penalty_usd   REAL        -- financial penalty amount
-  locked        BOOLEAN     -- requires intervention to remove
-  created_at    TIMESTAMP
-  active        BOOLEAN
+Every privileged action is appended to `audit.py`'s log so you can see exactly what happened and when.
 
-activity_log
-  id            INTEGER PRIMARY KEY
-  timestamp     TIMESTAMP
-  app_name      TEXT
-  window_title  TEXT
-  url           TEXT
-  domain        TEXT
-  rule_id       INTEGER     -- matched rule, if any
-  verdict       TEXT        -- allow | warn | block
-  duration_s    INTEGER     -- seconds spent
+### Dashboard and realtime (`dashboard.py`, `realtime.py`)
 
-stats_daily
-  date          TEXT PRIMARY KEY
-  productive_s  INTEGER
-  distracted_s  INTEGER
-  blocked_count INTEGER
-  score         REAL        -- 0-100 productivity score
+The FastAPI server serves a small web dashboard at `/dashboard` and a Server-Sent Events stream at `/events`. The browser extension and the dashboard both subscribe to the stream for live updates without polling.
 
-domains_seen
-  domain        TEXT PRIMARY KEY
-  first_seen    TIMESTAMP
-  category      TEXT        -- LLM-classified category, cached
-  times_blocked INTEGER
-```
+### Browser extension (`extension/`)
+
+Chrome Manifest V3 (compatible with Arc):
+- Content script reports current URL and page title every second
+- Receives verdicts and injects a full-page blocking overlay with countdown
+- Sends a content sample for context-aware rules
 
 ---
 
-## LLM Usage
+## Data model (SQLite)
 
-**Provider**: Google Gemini Flash (cheapest per-token, fast enough for real-time classification).
+Sentinel uses a single SQLite database at `~/.config/sentinel/sentinel.db`. Tables track rules, activity, stats, habits, journal, commitments, journeys, achievements, points, partners, penalties, audit log, and more — one logical concept per module, one set of tables per module.
 
-**API key**: User-provided, stored in `~/.config/sentinel/config.toml`.
-
-**Where LLMs are used**:
-1. **Rule parsing** — natural language to structured JSON (once per rule creation)
-2. **Activity classification** — is this activity violating a rule? (on every activity change, cached)
-3. **Context classification** — is this specific page productive or distracting? (on ambiguous pages)
-4. **Domain categorization** — what category is this domain? (once per new domain, cached in DB)
-5. **AI negotiation** — conversational unblocking with justification required
-6. **Photo proof verification** — does this photo show task completion?
-7. **Productivity scoring** — daily summary analysis
-
-**Cost control**: Aggressive caching. Classification results are cached for 60s per unique activity. Domain categories are cached permanently. Estimated cost: <$0.10/day for typical use.
+Migrations are applied automatically on startup by `db.py`.
 
 ---
 
-## Security Model
+## LLM usage
 
-The blocking system is designed to be hard (not impossible) to bypass:
+**Provider**: Google Gemini Flash (cheapest per-token, fast enough for real-time classification). The client is pluggable.
 
-1. **LaunchDaemon** runs as root, survives reboot and app deletion
-2. **pf firewall** rules require root to modify
-3. **/etc/hosts** changes are monitored and re-applied by the daemon every 5s
-4. **Locked rules** require completing an intervention chain to remove
-5. **Financial penalties** are charged immediately on bypass attempts
-6. **Accountability partners** are notified on bypass attempts
+**API key**: User-provided, stored locally in the config directory.
 
-The user can always fully uninstall via `sentinel uninstall` — but this requires completing all active interventions and notifies accountability partners. The goal is friction, not a prison.
+**Where the LLM is used**:
+1. Rule parsing — natural language to structured JSON
+2. Activity classification — verdict per activity change (cached)
+3. Context classification — productive vs distracting on ambiguous pages
+4. Domain categorization — once per new domain (cached forever)
+5. AI negotiation — conversational unblocking
+6. Photo proof verification
+7. Productivity scoring and daily narrative
+8. `sentinel ask` — open-ended Q&A over your local data
+9. Forecasting, correlation discovery, pattern detection
+10. Coach nudges and motivational content
 
 ---
 
-## Tech Stack
+## Security model
+
+Blocking is designed to be hard, not impossible, to bypass:
+1. LaunchDaemon runs as root and survives reboot and app deletion
+2. `pf` rules require root to modify
+3. `/etc/hosts` is monitored and re-applied every 5s
+4. Locked rules require completing an intervention chain to remove
+5. Lockdown mode is password-gated and time-boxed with no exit
+6. Financial penalties charge immediately on bypass
+7. Accountability partners are notified on bypass
+8. Audit log records every privileged action
+
+The user can always fully uninstall via `sentinel uninstall` — but this requires completing all active interventions and notifies partners. The goal is friction, not a prison.
+
+---
+
+## Tech stack
 
 | Layer | Technology |
 |---|---|
 | Language | Python 3.12+ |
 | CLI | click |
 | HTTP server | FastAPI + uvicorn |
-| Database | SQLite (via sqlite3 stdlib) |
+| Database | SQLite (stdlib `sqlite3`) |
 | macOS APIs | pyobjc (NSWorkspace, Accessibility) |
-| LLM | Google Gemini Flash (google-generativeai SDK) |
+| LLM | Google Gemini Flash (pluggable) |
 | Browser ext | Chrome MV3 (vanilla JS) |
-| Payments | Stripe (for financial penalties) |
 | Daemon | launchd (macOS native) |
-| Packaging | pyproject.toml + Makefile |
+| Tests | pytest, pytest-asyncio |
+| Packaging | pyproject.toml |
 
 ---
 
-## Installation Flow
+## Stats
 
 ```
-git clone ... && cd sentinel
-make install        # pip install -e ., installs CLI
-sentinel setup      # prompts for Gemini API key, installs LaunchDaemon (requires sudo)
+modules            71
+tests              1387 passing (~2.3s)
+lines of python    8227
+features per LoC   roughly 1 per 100
+external services  0 required (LLM provider is pluggable, data is local)
 ```
 
-The browser extension is loaded manually via `chrome://extensions` (developer mode) during development. Production distribution via Chrome Web Store later.
+```
+$ python -m pytest tests/
+1387 passed, 2 warnings in 2.30s
+
+$ find sentinel -name "*.py" -not -path "*/__pycache__/*" | xargs wc -l | tail -1
+8227 total
+
+$ ls sentinel/ | grep -v __ | grep ".py$" | wc -l
+71
+```
