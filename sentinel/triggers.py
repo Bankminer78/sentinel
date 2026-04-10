@@ -110,29 +110,50 @@ def list_all(conn) -> list:
     return [_row_to_dict(r) for r in rows]
 
 
-def delete(conn, name: str, force: bool = False) -> bool:
+def delete(conn, name: str, force: bool = False, actor: str = "user") -> bool:
     """Delete a trigger. Returns False if a no_delete_trigger lock blocks it."""
     _ensure_table(conn)
     if not force:
         from . import locks
         if locks.is_locked(conn, "no_delete_trigger", name):
+            _audit(conn, actor, "trigger.delete",
+                   {"name": name, "force": False}, status="locked")
             return False
     conn.execute("DELETE FROM agent_triggers WHERE name=?", (name,))
     conn.commit()
+    _audit(conn, actor, "trigger.delete",
+           {"name": name, "force": force},
+           status="forced" if force else "ok")
     return True
 
 
-def set_enabled(conn, name: str, enabled: bool, force: bool = False) -> bool:
+def set_enabled(conn, name: str, enabled: bool, force: bool = False,
+                actor: str = "user") -> bool:
     """Toggle a trigger. Disabling is gated by no_disable_trigger locks."""
     _ensure_table(conn)
     if not enabled and not force:
         from . import locks
         if locks.is_locked(conn, "no_disable_trigger", name):
+            _audit(conn, actor, "trigger.set_enabled",
+                   {"name": name, "enabled": False}, status="locked")
             return False
     conn.execute("UPDATE agent_triggers SET enabled=? WHERE name=?",
                  (1 if enabled else 0, name))
     conn.commit()
+    _audit(conn, actor, "trigger.set_enabled",
+           {"name": name, "enabled": enabled, "force": force})
     return True
+
+
+def _audit(conn, actor, primitive, args, status="ok"):
+    """Best-effort audit log entry — never block the operation if it fails."""
+    if conn is None:
+        return
+    try:
+        from . import audit
+        audit.log(conn, actor, primitive, args, status)
+    except Exception:
+        pass
 
 
 def _row_to_dict(r) -> dict:

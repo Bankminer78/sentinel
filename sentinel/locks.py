@@ -101,7 +101,8 @@ def _validate_friction(friction: dict | None) -> dict | None:
 # --- CRUD ---
 
 def create(conn, name: str, kind: str, target: str | None,
-           duration_seconds: int, friction: dict | None = None) -> int:
+           duration_seconds: int, friction: dict | None = None,
+           actor: str = "user") -> int:
     """Create a lock. Returns its id.
 
     Args:
@@ -111,6 +112,7 @@ def create(conn, name: str, kind: str, target: str | None,
             name). Pass ``None`` for a kind-wide lock that matches any target.
         duration_seconds: how long until the lock expires
         friction: optional gate for early release. ``None`` = no escape.
+        actor: who created the lock — recorded in audit log.
     """
     _ensure_table(conn)
     if not name or not isinstance(name, str):
@@ -127,6 +129,15 @@ def create(conn, name: str, kind: str, target: str | None,
         (name, kind, target, until_ts,
          json.dumps(fr) if fr else None, time.time()))
     conn.commit()
+    try:
+        from . import audit
+        audit.log(conn, actor, "lock.create", {
+            "lock_id": cur.lastrowid, "kind": kind, "target": target,
+            "duration_seconds": int(duration_seconds),
+            "has_friction": fr is not None,
+        })
+    except Exception:
+        pass
     return cur.lastrowid
 
 
@@ -297,6 +308,15 @@ def complete_release(conn, lock_id: int, token: str,
     conn.execute("UPDATE locks SET released_at=? WHERE id=?",
                  (time.time(), lock_id))
     conn.commit()
+    try:
+        from . import audit
+        audit.log(conn, "user", "lock.release", {
+            "lock_id": lock_id, "kind": lk.get("kind"),
+            "target": lk.get("target"),
+            "method": "friction_completed",
+        })
+    except Exception:
+        pass
     return {"released": True}
 
 

@@ -118,6 +118,17 @@ def trigger(conn, reason: str, kinds: list[str] | None = None) -> dict:
         "screen_lockout_ended": screen_ended,
         "ts": now,
     }, tags=["exit"])
+    # Audit log entry — payload-free summary, no `reason` text
+    try:
+        from . import audit
+        audit.log(conn, "user", "emergency_exit", {
+            "kinds": kinds,
+            "released_count": len(released_ids),
+            "screen_lockout_ended": screen_ended,
+            "remaining_after": max(0, get_limit(conn) - get_used_this_month(conn)),
+        })
+    except Exception:
+        pass
     return {
         "ok": True,
         "released_locks": released_ids,

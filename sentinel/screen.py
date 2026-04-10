@@ -50,7 +50,8 @@ def get_state(conn) -> dict:
     }
 
 
-def lock(conn, duration_seconds: int, message: str = "Focus mode") -> dict:
+def lock(conn, duration_seconds: int, message: str = "Focus mode",
+         actor: str = "user") -> dict:
     """Start (or extend) a screen lockout.
 
     If a lockout is already active, extends it to whichever ``until_ts`` is
@@ -72,6 +73,14 @@ def lock(conn, duration_seconds: int, message: str = "Focus mode") -> dict:
         "started_at": cur.get("started_at") if cur["active"] else now,
     }
     db.set_config(conn, CFG_KEY, json.dumps(state))
+    try:
+        from . import audit
+        audit.log(conn, actor, "screen_lock", {
+            "duration_seconds": int(duration_seconds),
+            "extended": cur["active"],
+        })
+    except Exception:
+        pass
     return get_state(conn)
 
 

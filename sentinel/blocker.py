@@ -8,13 +8,26 @@ _blocked_domains = set()
 _blocked_apps = set()
 
 
-def block_domain(domain: str):
+def _audit(conn, actor, primitive, args, status="ok"):
+    """Log to the audit table if a conn is provided."""
+    if conn is None:
+        return
+    try:
+        from . import audit
+        audit.log(conn, actor, primitive, args, status)
+    except Exception:
+        pass  # never let audit failures block the actual operation
+
+
+def block_domain(domain: str, conn=None, actor: str = "system"):
     """Add domain to /etc/hosts block."""
     _blocked_domains.add(domain)
     _sync_hosts()
+    _audit(conn, actor, "block_domain", {"domain": domain})
 
 
-def unblock_domain(domain: str, conn=None, force: bool = False) -> bool:
+def unblock_domain(domain: str, conn=None, force: bool = False,
+                   actor: str = "system") -> bool:
     """Remove a domain from the block list. Returns True on success.
 
     Honors locks: if a ``no_unblock_domain`` lock covers this domain, the
@@ -25,25 +38,37 @@ def unblock_domain(domain: str, conn=None, force: bool = False) -> bool:
     if conn is not None and not force:
         from . import locks  # lazy: avoid circular import
         if locks.is_locked(conn, "no_unblock_domain", domain):
+            _audit(conn, actor, "unblock_domain",
+                   {"domain": domain, "force": force}, status="locked")
             return False
     _blocked_domains.discard(domain)
     _sync_hosts()
+    _audit(conn, actor, "unblock_domain",
+           {"domain": domain, "force": force},
+           status="forced" if force else "ok")
     return True
 
 
-def block_app(bundle_id: str):
+def block_app(bundle_id: str, conn=None, actor: str = "system"):
     """Add app to blocked list and kill if running."""
     _blocked_apps.add(bundle_id)
     kill_app(bundle_id)
+    _audit(conn, actor, "block_app", {"bundle_id": bundle_id})
 
 
-def unblock_app(bundle_id: str, conn=None, force: bool = False) -> bool:
+def unblock_app(bundle_id: str, conn=None, force: bool = False,
+                actor: str = "system") -> bool:
     """Remove an app from the block list. Honors ``no_unblock_app`` locks."""
     if conn is not None and not force:
         from . import locks
         if locks.is_locked(conn, "no_unblock_app", bundle_id):
+            _audit(conn, actor, "unblock_app",
+                   {"bundle_id": bundle_id, "force": force}, status="locked")
             return False
     _blocked_apps.discard(bundle_id)
+    _audit(conn, actor, "unblock_app",
+           {"bundle_id": bundle_id, "force": force},
+           status="forced" if force else "ok")
     return True
 
 

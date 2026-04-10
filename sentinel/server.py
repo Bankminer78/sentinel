@@ -20,6 +20,7 @@ from . import (
     triggers as triggers_mod, locks as locks_mod,
     imessage as imessage_mod, notify as notify_mod,
     screen as screen_mod, emergency as emergency_mod,
+    audit as audit_mod,
 )
 
 app = FastAPI(title="Sentinel")
@@ -338,6 +339,33 @@ def backup_create():
 @app.get("/backups")
 def backups_list():
     return backup_mod.list_backups()
+
+
+# --- Audit log (append-only, gated by no_delete_audit lock) ---
+@app.get("/audit")
+def get_audit(limit: int = 100, primitive: Optional[str] = None,
+              actor: Optional[str] = None):
+    return audit_mod.list_recent(get_conn(), limit=limit,
+                                 primitive=primitive, actor=actor)
+
+
+@app.get("/audit/count")
+def get_audit_count(since: Optional[float] = None):
+    return {"count": audit_mod.count(get_conn(), since=since)}
+
+
+class AuditCleanup(BaseModel):
+    older_than_days: int
+
+
+@app.post("/audit/cleanup")
+def post_audit_cleanup(body: AuditCleanup):
+    import time
+    cutoff = time.time() - max(0, body.older_than_days) * 86400
+    result = audit_mod.cleanup_older_than(get_conn(), cutoff)
+    if not result.get("ok"):
+        raise HTTPException(423, result.get("reason"))
+    return result
 
 
 # --- Triggers (AI-authored features) ---
