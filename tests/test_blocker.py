@@ -251,16 +251,26 @@ class TestEnforce:
 
 
 class TestSyncHosts:
-    """Tests for /etc/hosts synchronization."""
+    """Tests for /etc/hosts synchronization.
+
+    The new _sync_hosts reads the hosts file, builds the new content, and
+    pipes it through ``sudo tee /etc/hosts``. Tests verify the content
+    that would be piped (captured from subprocess.run's ``input`` kwarg)
+    rather than re-reading the file.
+    """
 
     def test_sync_hosts_writes_blocked_domains(self, tmp_path):
         hosts_file = tmp_path / "hosts"
         hosts_file.write_text("# Default hosts\n127.0.0.1 localhost\n")
-        blocker._blocked_domains.add("twitter.com")
+        blocker._blocked_domains = {"twitter.com"}
+        calls = []
         with patch.object(blocker, "HOSTS_PATH", str(hosts_file)), \
-             patch("sentinel.blocker.subprocess.run"):
+             patch("sentinel.blocker.subprocess.run",
+                   side_effect=lambda *a, **kw: (calls.append((a, kw)) or MagicMock(returncode=0))):
             blocker._sync_hosts()
-        content = hosts_file.read_text()
+        # Find the tee call and check its input
+        tee_call = next((a, kw) for a, kw in calls if "tee" in str(a))
+        content = tee_call[1]["input"].decode()
         assert "0.0.0.0 twitter.com" in content
         assert "0.0.0.0 www.twitter.com" in content
 
@@ -272,29 +282,38 @@ class TestSyncHosts:
             "0.0.0.0 old.com\n"
             "# SENTINEL BLOCK END\n"
         )
-        blocker._blocked_domains.add("new.com")
+        blocker._blocked_domains = {"new.com"}
+        calls = []
         with patch.object(blocker, "HOSTS_PATH", str(hosts_file)), \
-             patch("sentinel.blocker.subprocess.run"):
+             patch("sentinel.blocker.subprocess.run",
+                   side_effect=lambda *a, **kw: (calls.append((a, kw)) or MagicMock(returncode=0))):
             blocker._sync_hosts()
-        content = hosts_file.read_text()
+        tee_call = next((a, kw) for a, kw in calls if "tee" in str(a))
+        content = tee_call[1]["input"].decode()
         assert "old.com" not in content
         assert "0.0.0.0 new.com" in content
 
     def test_sync_hosts_preserves_original_entries(self, tmp_path):
         hosts_file = tmp_path / "hosts"
         hosts_file.write_text("127.0.0.1 localhost\n::1 localhost\n")
-        blocker._blocked_domains.add("twitter.com")
+        blocker._blocked_domains = {"twitter.com"}
+        calls = []
         with patch.object(blocker, "HOSTS_PATH", str(hosts_file)), \
-             patch("sentinel.blocker.subprocess.run"):
+             patch("sentinel.blocker.subprocess.run",
+                   side_effect=lambda *a, **kw: (calls.append((a, kw)) or MagicMock(returncode=0))):
             blocker._sync_hosts()
-        content = hosts_file.read_text()
+        tee_call = next((a, kw) for a, kw in calls if "tee" in str(a))
+        content = tee_call[1]["input"].decode()
         assert "127.0.0.1 localhost" in content
+        assert "0.0.0.0 twitter.com" in content
 
     def test_sync_hosts_empty_blocked_set(self, tmp_path):
         hosts_file = tmp_path / "hosts"
         hosts_file.write_text("127.0.0.1 localhost\n")
+        blocker._blocked_domains = set()
         with patch.object(blocker, "HOSTS_PATH", str(hosts_file)), \
              patch("sentinel.blocker.subprocess.run"):
             blocker._sync_hosts()
+        # With no blocked domains, the file shouldn't have a sentinel block
         content = hosts_file.read_text()
         assert "SENTINEL BLOCK START" not in content

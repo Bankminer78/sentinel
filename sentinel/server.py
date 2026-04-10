@@ -43,6 +43,15 @@ def get_conn():
 def startup():
     global conn
     conn = db.connect()
+    # One-time sudo setup: installs /etc/sudoers.d/sentinel so the daemon
+    # can write /etc/hosts without a password prompt. Shows macOS auth
+    # dialog ONCE at first install, then never again. Like Cold Turkey.
+    blocker.ensure_sudo_access()
+    # Load persisted blocks from DB + sync to /etc/hosts. Blocks survive
+    # daemon restarts. This must happen BEFORE monitor.start() so the
+    # hot path's is_blocked_domain() check has the right state from the
+    # very first /activity POST.
+    blocker.load_from_db(conn)
     monitor.start()
     persistence.start_watcher()
     triggers_mod.start_worker(conn)
