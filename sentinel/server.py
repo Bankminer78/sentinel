@@ -17,13 +17,10 @@ from typing import Optional, Any
 from pathlib import Path as _StaticPath
 from . import (
     db, classifier, monitor, blocker, skiplist, persistence,
-    stats as stats_mod, query as query_mod, ai_store, screenshots,
-    privacy as privacy_mod, backup as backup_mod, ui,
-    triggers as triggers_mod, locks as locks_mod,
-    imessage as imessage_mod, notify as notify_mod,
-    screen as screen_mod, emergency as emergency_mod,
-    audit as audit_mod, sandbox as sandbox_mod,
-    primitives as primitives_mod,
+    stats as stats_mod, ai_store,
+    privacy as privacy_mod, backup as backup_mod,
+    locks as locks_mod, audit as audit_mod,
+    emergency as emergency_mod,
     agent as agent_mod, policy_runner as policy_runner_mod,
 )
 
@@ -54,18 +51,11 @@ def startup():
     blocker.load_from_db(conn)
     monitor.start()
     persistence.start_watcher()
-    triggers_mod.start_worker(conn)
     policy_runner_mod.start()
-    # Tell the http_fetch primitive which port we're on so it can refuse
-    # the agent calling its own admin endpoints. The CLI passes the port
-    # via the SENTINEL_PORT env var; default to 9849.
-    import os as _os
-    primitives_mod.register_daemon_port(int(_os.environ.get("SENTINEL_PORT", "9849")))
 
 
 @app.on_event("shutdown")
 def shutdown():
-    triggers_mod.stop_worker()
     policy_runner_mod.stop()
 
 
@@ -268,32 +258,18 @@ def blocked_list():
     return blocker.get_blocked()
 
 
-# --- Vision primitive (agent calls this from triggers) ---
-class VisionSnap(BaseModel):
-    user_context: str = ""
+# --- Locks (read-only for the GUI; Claude creates locks via Bash) ---
+@app.get("/locks")
+def locks_list(kind: Optional[str] = None):
+    return locks_mod.list_active(get_conn(), kind=kind)
 
 
-@app.post("/vision/snapshot")
-async def vision_snapshot(body: VisionSnap):
-    c = get_conn()
-    api_key = db.get_config(c, "gemini_api_key")
-    if not api_key:
-        raise HTTPException(400, "API key not set")
-    return await screenshots.capture_and_analyze(api_key, body.user_context)
-
-
-# --- AI Q&A ---
-class AskBody(BaseModel):
-    question: str
-
-
-@app.post("/ask")
-async def ask(body: AskBody):
-    c = get_conn()
-    api_key = db.get_config(c, "gemini_api_key")
-    if not api_key:
-        raise HTTPException(400, "API key not set")
-    return {"answer": await query_mod.ask(c, body.question, api_key)}
+@app.get("/locks/{lock_id}")
+def locks_get(lock_id: int):
+    lk = locks_mod.get(get_conn(), lock_id)
+    if not lk:
+        raise HTTPException(404, "not found")
+    return lk
 
 
 # --- AI Store ---
@@ -398,47 +374,6 @@ def backups_list():
     return backup_mod.list_backups()
 
 
-# --- Sandbox allowlists (gated by no_modify_allowlist lock) ---
-class HttpAllowlistBody(BaseModel):
-    hosts: list
-
-
-class SqlAllowlistBody(BaseModel):
-    paths: list
-
-
-@app.get("/sandbox/http-allowlist")
-def get_http_allowlist():
-    return {"hosts": sandbox_mod.get_http_allowlist(get_conn())}
-
-
-@app.post("/sandbox/http-allowlist")
-def set_http_allowlist(body: HttpAllowlistBody):
-    try:
-        sandbox_mod.set_http_allowlist(get_conn(), body.hosts)
-        return {"ok": True, "hosts": sandbox_mod.get_http_allowlist(get_conn())}
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    except PermissionError as e:
-        raise HTTPException(423, str(e))
-
-
-@app.get("/sandbox/sql-allowlist")
-def get_sql_allowlist():
-    return {"paths": sandbox_mod.get_sql_allowlist(get_conn())}
-
-
-@app.post("/sandbox/sql-allowlist")
-def set_sql_allowlist(body: SqlAllowlistBody):
-    try:
-        sandbox_mod.set_sql_allowlist(get_conn(), body.paths)
-        return {"ok": True, "paths": sandbox_mod.get_sql_allowlist(get_conn())}
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    except PermissionError as e:
-        raise HTTPException(423, str(e))
-
-
 # --- Audit log (append-only, gated by no_delete_audit lock) ---
 @app.get("/audit")
 def get_audit(limit: int = 100, primitive: Optional[str] = None,
@@ -464,268 +399,6 @@ def post_audit_cleanup(body: AuditCleanup):
     if not result.get("ok"):
         raise HTTPException(423, result.get("reason"))
     return result
-
-
-# --- Triggers (AI-authored features) ---
-class TriggerCreate(BaseModel):
-    name: str
-    interval_sec: int = 300
-    description: str = ""
-    recipe: dict
-
-
-class TriggerAuthor(BaseModel):
-    request: str
-    test: bool = True
-    max_revisions: int = 2
-
-
-@app.post("/triggers")
-def triggers_create(body: TriggerCreate):
-    try:
-        tid = triggers_mod.create(get_conn(), body.name, body.recipe,
-                                  interval_sec=body.interval_sec,
-                                  description=body.description)
-        return {"id": tid, "name": body.name}
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-
-
-@app.get("/triggers")
-def triggers_list():
-    return triggers_mod.list_all(get_conn())
-
-
-@app.get("/triggers/calls")
-def triggers_calls():
-    return triggers_mod.list_calls()
-
-
-@app.get("/triggers/{name}")
-def triggers_get(name: str):
-    t = triggers_mod.get(get_conn(), name)
-    if not t:
-        raise HTTPException(404, "not found")
-    return t
-
-
-@app.delete("/triggers/{name}")
-def triggers_delete(name: str):
-    if not triggers_mod.delete(get_conn(), name):
-        raise HTTPException(423, "trigger is locked — cannot delete until lock expires")
-    return {"ok": True}
-
-
-@app.post("/triggers/{name}/toggle")
-def triggers_toggle(name: str):
-    t = triggers_mod.get(get_conn(), name)
-    if not t:
-        raise HTTPException(404, "not found")
-    new = not bool(t.get("enabled"))
-    if not triggers_mod.set_enabled(get_conn(), name, new):
-        raise HTTPException(423, "trigger is locked — cannot disable until lock expires")
-    return {"ok": True, "enabled": new}
-
-
-@app.post("/triggers/{name}/run")
-def triggers_run(name: str):
-    return triggers_mod.run_once(get_conn(), name)
-
-
-@app.get("/triggers/{name}/runs")
-def triggers_runs(name: str, limit: int = 10):
-    return triggers_mod.list_runs(get_conn(), name, limit=limit)
-
-
-@app.get("/triggers/{name}/health")
-def triggers_health(name: str):
-    return triggers_mod.health(get_conn(), name)
-
-
-# --- iMessage sensor ---
-@app.get("/imessage/access")
-def imessage_access():
-    return imessage_mod.access_status()
-
-
-@app.get("/imessage/current")
-def imessage_current():
-    return imessage_mod.current_chat()
-
-
-@app.get("/imessage/recent-chats")
-def imessage_recent_chats(limit: int = 10):
-    return imessage_mod.recent_chats(limit=limit)
-
-
-@app.get("/imessage/recent-messages")
-def imessage_recent_messages(handle: str, limit: int = 20):
-    return imessage_mod.recent_messages(handle, limit=limit)
-
-
-# --- Notify / dialog effectors ---
-class NotifyBody(BaseModel):
-    title: str = "Sentinel"
-    body: str = ""
-    subtitle: str = ""
-
-
-class DialogBody(BaseModel):
-    title: str = "Sentinel"
-    body: str = ""
-    buttons: list = ["OK"]
-    default_button: Optional[str] = None
-    timeout_seconds: Optional[int] = None
-
-
-@app.post("/notify")
-def post_notify(body: NotifyBody):
-    return notify_mod.notify(body.title, body.body, body.subtitle)
-
-
-@app.post("/dialog")
-def post_dialog(body: DialogBody):
-    return notify_mod.dialog(body.title, body.body, body.buttons,
-                             body.default_button, body.timeout_seconds)
-
-
-# --- Frozen Turkey: screen lockout ---
-class ScreenLockBody(BaseModel):
-    duration_seconds: int
-    message: str = "Focus mode"
-
-
-@app.post("/screen-lock")
-def post_screen_lock(body: ScreenLockBody):
-    try:
-        return screen_mod.lock(get_conn(), body.duration_seconds, body.message)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-
-
-@app.get("/screen-lock/state")
-def get_screen_lock_state():
-    """Polled by the macOS app every second to know whether to take over."""
-    return screen_mod.get_state(get_conn())
-
-
-# --- Emergency exit ---
-class EmergencyExitBody(BaseModel):
-    reason: str
-    kinds: Optional[list] = None
-
-
-@app.get("/emergency-exit/status")
-def emergency_status():
-    return emergency_mod.status(get_conn())
-
-
-@app.get("/emergency-exit/history")
-def emergency_history(limit: int = 20):
-    return emergency_mod.history(get_conn(), limit=limit)
-
-
-@app.post("/emergency-exit")
-def emergency_exit(body: EmergencyExitBody):
-    result = emergency_mod.trigger(get_conn(), body.reason, body.kinds)
-    if not result.get("ok"):
-        raise HTTPException(429 if "remaining" in result.get("error", "")
-                            else 400, result.get("error"))
-    return result
-
-
-# --- Locks (commitments + friction-gated early release) ---
-class LockCreate(BaseModel):
-    name: str
-    kind: str
-    target: Optional[str] = None
-    duration_seconds: int
-    friction: Optional[dict] = None
-
-
-class ChallengeResponse(BaseModel):
-    token: str
-    response: Optional[str] = None
-
-
-@app.post("/locks")
-def locks_create(body: LockCreate):
-    try:
-        lid = locks_mod.create(get_conn(), body.name, body.kind, body.target,
-                               body.duration_seconds, body.friction)
-        return {"id": lid, "name": body.name, "kind": body.kind}
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-
-
-@app.get("/locks")
-def locks_list(kind: Optional[str] = None, include_inactive: bool = False):
-    if include_inactive:
-        return locks_mod.list_all(get_conn())
-    return locks_mod.list_active(get_conn(), kind=kind)
-
-
-@app.get("/locks/{lock_id}")
-def locks_get(lock_id: int):
-    lk = locks_mod.get(get_conn(), lock_id)
-    if not lk:
-        raise HTTPException(404, "not found")
-    return lk
-
-
-@app.delete("/locks/{lock_id}")
-def locks_delete(lock_id: int):
-    if not locks_mod.delete(get_conn(), lock_id):
-        raise HTTPException(423, "lock is still active — cannot delete")
-    return {"ok": True}
-
-
-@app.post("/locks/{lock_id}/release")
-def locks_request_release(lock_id: int):
-    return locks_mod.request_release(get_conn(), lock_id)
-
-
-@app.post("/locks/{lock_id}/complete")
-def locks_complete_release(lock_id: int, body: ChallengeResponse):
-    return locks_mod.complete_release(get_conn(), lock_id, body.token, body.response)
-
-
-@app.post("/triggers/author")
-async def triggers_author(body: TriggerAuthor):
-    """Plain English → trigger recipe via the internal Gemini agent.
-
-    By default, test-runs the recipe and revises on failure (up to
-    body.max_revisions times). Set test=false to skip the feedback loop.
-    """
-    import httpx
-    c = get_conn()
-    api_key = db.get_config(c, "gemini_api_key")
-    if not api_key:
-        raise HTTPException(400, "API key not set")
-    try:
-        if body.test:
-            result = await triggers_mod.author_and_test(
-                c, api_key, body.request, max_revisions=body.max_revisions)
-            if not result["ok"]:
-                raise HTTPException(422, {
-                    "message": "trigger failed test-run after revisions",
-                    "history": result["history"],
-                    "last_error": result.get("error"),
-                    "test_run": result.get("test_run"),
-                })
-            return result
-        else:
-            spec = await triggers_mod.author_from_text(api_key, body.request)
-            tid = triggers_mod.create(c, spec["name"], spec["recipe"],
-                                      interval_sec=int(spec.get("interval_sec", 300)),
-                                      description=spec.get("description", ""))
-            return {"ok": True, "id": tid, "spec": spec}
-    except ValueError as e:
-        raise HTTPException(400, f"author failed: {e}")
-    except httpx.HTTPStatusError as e:
-        raise HTTPException(502, f"LLM upstream error: {e.response.status_code}")
-    except httpx.HTTPError as e:
-        raise HTTPException(502, f"LLM network error: {e}")
 
 
 # --- Claude agent surface (Phase 1 of the lockbox refactor) ---
