@@ -289,14 +289,15 @@ def _evaluate_condition(cond: dict, locals_dict: dict) -> bool:
 
 
 # --- Call registry: the abstract operations triggers can invoke. ---
-
-def _call_vision_check(conn, args, ctx):
-    api_key = db_mod.get_config(conn, "gemini_api_key")
-    if not api_key:
-        return {"verdict": "neutral", "details": "no api key"}
-    user_context = args.get("user_context", "")
-    return asyncio.run(screenshots.capture_and_analyze(api_key, user_context))
-
+#
+# vision_check, imessage_current, imessage_recent_chats, and
+# imessage_recent_messages used to live here as direct CALL wrappers.
+# They are now MACROS (see sentinel/macros.py) that desugar at validation
+# time into the equivalent primitive sub-recipes. The wrappers were
+# unreachable from the trigger DSL after Phase 4, so they were removed.
+# Direct REST callers (the GUI's /vision/snapshot endpoint, the /imessage/*
+# endpoints) still use the underlying typed modules — only the in-recipe
+# usage flows through macros now.
 
 def _call_get_status(conn, args, ctx):
     return {
@@ -354,22 +355,7 @@ def _call_list_locks(conn, args, ctx):
     return locks_mod.list_active(conn, kind=args.get("kind"))
 
 
-# --- iMessage sensor ---
-
-def _call_imessage_current(conn, args, ctx):
-    return imessage_mod.current_chat()
-
-
-def _call_imessage_recent_chats(conn, args, ctx):
-    return imessage_mod.recent_chats(limit=int(args.get("limit", 10)))
-
-
-def _call_imessage_recent_messages(conn, args, ctx):
-    return imessage_mod.recent_messages(
-        args.get("handle", ""), limit=int(args.get("limit", 20)))
-
-
-# --- Notify / dialog effectors ---
+# --- Notify / dialog effectors (trusted primitives, not macros) ---
 
 def _call_notify(conn, args, ctx):
     return notify_mod.notify(
@@ -510,30 +496,28 @@ def _call_log(conn, args, ctx):
 
 
 CALLS: dict[str, Callable] = {
-    "vision_check": _call_vision_check,
+    # State + sensors (trust-boundary or low-level)
     "get_status": _call_get_status,
     "get_current": _call_get_current,
-    "block_domain": _call_block_domain,
-    "unblock_domain": _call_unblock_domain,
     "get_score": _call_get_score,
     "get_activities": _call_get_activities,
     "top_distractions": _call_top_distractions,
-    "kv_get": _call_kv_get,
-    "kv_set": _call_kv_set,
-    "kv_increment": _call_kv_increment,
-    "doc_add": _call_doc_add,
-    "now": _call_now,
-    "log": _call_log,
-    "create_lock": _call_create_lock,
-    "is_locked": _call_is_locked,
-    "list_locks": _call_list_locks,
-    "imessage_current": _call_imessage_current,
-    "imessage_recent_chats": _call_imessage_recent_chats,
-    "imessage_recent_messages": _call_imessage_recent_messages,
+    # Effectors (trust-boundary)
+    "block_domain": _call_block_domain,
+    "unblock_domain": _call_unblock_domain,
     "notify": _call_notify,
     "dialog": _call_dialog,
     "lock_screen": _call_lock_screen,
     "is_screen_locked": _call_is_screen_locked,
+    # Storage
+    "kv_get": _call_kv_get,
+    "kv_set": _call_kv_set,
+    "kv_increment": _call_kv_increment,
+    "doc_add": _call_doc_add,
+    # Locks (commitment primitive)
+    "create_lock": _call_create_lock,
+    "is_locked": _call_is_locked,
+    "list_locks": _call_list_locks,
     "emergency_remaining": _call_emergency_remaining,
     # Generic primitives — the agent's building blocks
     "http_fetch": _call_http_fetch,
@@ -542,6 +526,33 @@ CALLS: dict[str, Callable] = {
     "screen_capture": _call_screen_capture,
     "regex_match": _call_regex_match,
     "base64_encode": _call_base64_encode,
+    # Utilities
+    "now": _call_now,
+    "log": _call_log,
+}
+
+
+_MACRO_DESCRIPTIONS = {
+    "vision_check": (
+        "args:{user_context} → {ok,value:str}  // [MACRO] one-liner that"
+        " expands to screen_capture + http_fetch(gemini, auth=gemini) +"
+        " jsonpath. The .value is Gemini's verdict text (parse it as JSON to"
+        " get {verdict:'productive'|'distracted'|'neutral', details:str})."
+    ),
+    "imessage_current": (
+        "args:{} → {ok,value:{handle,service,style,text,ts}} | {ok:false}"
+        "  // [MACRO] expands to sql_query against ~/Library/Messages/chat.db"
+        " for the most recent message. Requires Full Disk Access on the"
+        " daemon process."
+    ),
+    "imessage_recent_chats": (
+        "args:{limit?} → {ok,rows:[{handle,service,style,text,ts},...],row_count}"
+        "  // [MACRO] sql_query grouped by handle, newest first."
+    ),
+    "imessage_recent_messages": (
+        "args:{handle,limit?} → {ok,rows:[{text,from_me,ts},...],row_count}"
+        "  // [MACRO] sql_query for messages with a specific handle."
+    ),
 }
 
 
@@ -555,7 +566,8 @@ def list_calls(include_macros: bool = True) -> dict:
     expansion is reviewable in GET /triggers/{name}.
     """
     return {
-        "vision_check": "args:{user_context} → {verdict:'productive'|'distracted'|'neutral', details:str}",
+        # --- Macros (one-line; expanded at validation time) ---
+        **(_MACRO_DESCRIPTIONS if include_macros else {}),
         "get_status": "args:{} → {current:{app,title,domain,url}, blocked:{domains:[...]}, rules_count:int}",
         "get_current": "args:{} → {app,title,domain,url,bundle_id}",
         "block_domain": "args:{domain} → {ok:bool, domain:str}",
@@ -579,18 +591,6 @@ def list_calls(include_macros: bool = True) -> dict:
         ),
         "is_locked": "args:{kind,target?} → {locked:bool}  // is any active lock matching this?",
         "list_locks": "args:{kind?} → [lock,...]  // active locks, optionally filtered by kind",
-        "imessage_current": (
-            "args:{} → {handle,service,is_group,last_message_ts,last_text} | {error}"
-            "  // most recently active iMessage chat"
-        ),
-        "imessage_recent_chats": (
-            "args:{limit?} → [{handle,service,is_group,last_message_ts,last_text},...]"
-            "  // recent chat threads, newest first"
-        ),
-        "imessage_recent_messages": (
-            "args:{handle,limit?} → [{ts,from_me,text},...]"
-            "  // recent messages with a specific handle"
-        ),
         "notify": (
             "args:{title,body,subtitle?} → {ok}"
             "  // macOS banner notification, non-blocking"
@@ -647,7 +647,24 @@ def list_calls(include_macros: bool = True) -> dict:
     }
 
 
-# --- Execution ---
+# --- Rate limits (per-recipe-run budgets) ---
+#
+# Catches runaway recipes the validator cannot detect statically (e.g. a
+# nested when-loop that fires hundreds of http_fetch calls). When a budget
+# is exhausted, the call fails with reason_code=rate_limited and the
+# error_category=step_returned_error path runs as usual.
+
+DEFAULT_MAX_CALLS_PER_RUN = 50
+PER_PRIMITIVE_LIMITS = {
+    "http_fetch": 10,
+    "sql_query": 20,
+    "screen_capture": 5,
+    "vision_check": 5,    # legacy CALL — same budget as screen_capture
+    "notify": 20,
+    "dialog": 5,          # blocking, low cap
+    "lock_screen": 3,
+}
+
 
 def _step_status(result: Any) -> str:
     """Detect failure in a step's result. {error: ...} or {ok: false} → error."""
@@ -716,6 +733,28 @@ def _execute_steps(conn, steps: list, locals_dict: dict, ctx: dict,
                 run_log.append({
                     "type": "call", "call": call_name,
                     "status": "error", "error_category": "unknown_call",
+                })
+                continue
+            # Per-recipe rate limit checks. Counters live in ctx for the
+            # duration of the run.
+            counters = ctx.setdefault("_call_counts", {})
+            counters["__total__"] = counters.get("__total__", 0) + 1
+            counters[call_name] = counters.get(call_name, 0) + 1
+            max_total = ctx.get("_max_calls", DEFAULT_MAX_CALLS_PER_RUN)
+            if counters["__total__"] > max_total:
+                run_log.append({
+                    "type": "call", "call": call_name, "status": "error",
+                    "error_category": "step_returned_error",
+                    "rate_limit": "total_per_run",
+                })
+                # Don't bind save_as on rate-limited calls
+                continue
+            per_limit = PER_PRIMITIVE_LIMITS.get(call_name)
+            if per_limit is not None and counters[call_name] > per_limit:
+                run_log.append({
+                    "type": "call", "call": call_name, "status": "error",
+                    "error_category": "step_returned_error",
+                    "rate_limit": "per_primitive",
                 })
                 continue
             try:
@@ -809,7 +848,13 @@ def run_once(conn, name: str) -> dict:
     if not t:
         return {"status": "error", "error": "not found", "locals": {}, "steps": []}
     locals_dict: dict = {}
-    ctx = {"name": name, "trigger_id": t["id"]}
+    recipe = t["recipe"]
+    ctx = {
+        "name": name,
+        "trigger_id": t["id"],
+        "_max_calls": int(recipe.get("max_calls_per_run", DEFAULT_MAX_CALLS_PER_RUN)),
+        "_call_counts": {},
+    }
     started = time.time()
     fatal_err = None
     run_log: list = []

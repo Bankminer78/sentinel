@@ -5,7 +5,7 @@ A lean, AI-native accountability app for macOS.
 You interact through a native macOS GUI. Your external AI agents (your personal Claude, etc.) interact through a local REST API. The app keeps a small, sharp core of features that can't be done by an AI; everything else is a generic store the AI can use freely.
 
 ```
-18 Python modules · 477 tests · 3,240 LoC · native macOS app
+26 Python modules · 695 tests · 5,550 LoC · native macOS app
 ```
 
 ## What it does
@@ -15,6 +15,9 @@ You interact through a native macOS GUI. Your external AI agents (your personal 
 - **Common productivity** — pomodoro and locked focus sessions. That's it. No kanban, no journal, no habit tracker — your AI can build those on top.
 - **AI Q&A** — ask questions about your data in plain English.
 - **AI-Authored Triggers** — describe a feature in plain English, the internal Gemini agent writes a trigger recipe, Sentinel runs it on a schedule. No code, no shipped module.
+- **Generic primitives** — `http_fetch`, `sql_query`, `jsonpath`, `screen_capture` plus `notify`/`dialog`/`block_domain`/`lock` give the agent enough building blocks to compose any integration the codebase has never seen. Hardened against SSRF, ATTACH escapes, prompt injection, payload leaks. New integrations are *recipes*, not Python.
+- **Macros** — `vision_check`, `imessage_current`, etc. are one-liners in the DSL that desugar at validation time to canonical sub-recipes using the primitives. The expanded form is what runs and what `GET /triggers/{name}` shows — review-able.
+- **Append-only audit log** — every primitive call lands in a dedicated `agent_audit_log` table with sanitized arg summary. Gated by `no_delete_audit` lock so the agent (and even the user) can commit to "no wiping history for the next N hours".
 - **Locks (commitment primitive)** — the Cold Turkey "I genuinely can't disable this" feature, but as a generic primitive. Lock any operation (`no_unblock_domain`, `no_delete_trigger`, or any custom kind the agent invents) for a duration. Optional friction gate for early release: wait N seconds, or type N random characters. Locks outlive the trigger that created them.
 - **Generic AI Store** — a key/value + document store the AI can use to track anything (habits, notes, custom metrics) without you having to ship a feature for it.
 - **macOS GUI** — a native menu-bar app with a WKWebView dashboard.

@@ -414,8 +414,21 @@ def test_list_calls_has_essentials():
 
 
 def test_call_registry_matches_descriptions():
-    """Every CALL has a description, every description has a CALL."""
-    assert set(triggers.CALLS.keys()) == set(triggers.list_calls().keys())
+    """Every CALL has a description.
+
+    list_calls() also includes macro descriptions (one-line shortcuts that
+    expand at validation time), so it's a superset of the CALLS registry.
+    The relationship is: every real CALL has a description, and every
+    extra description is a macro that expands to a sub-recipe of real CALLs.
+    """
+    descriptions = set(triggers.list_calls().keys())
+    real_calls = set(triggers.CALLS.keys())
+    # Every real CALL is documented
+    assert real_calls.issubset(descriptions)
+    # Every extra description corresponds to a built-in macro
+    from sentinel import macros
+    extras = descriptions - real_calls
+    assert extras == set(macros.BUILTIN_MACROS.keys())
 
 
 # --- Validation depth ---

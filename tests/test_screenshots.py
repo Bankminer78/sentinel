@@ -8,13 +8,8 @@ import pytest
 from sentinel import screenshots
 
 
-@pytest.fixture(autouse=True)
-def _reset_vision():
-    screenshots._vision_running = False
-    screenshots._vision_thread = None
-    screenshots._last_verdict = {"verdict": "neutral", "details": "", "ts": 0}
-    yield
-    screenshots._vision_running = False
+# The background-monitor module-level state was removed in Phase 5; nothing
+# to reset between tests now.
 
 
 class TestTakeScreenshot:
@@ -107,36 +102,3 @@ class TestCaptureAndAnalyze:
              patch("sentinel.screenshots.analyze_screenshot", new=AsyncMock(return_value="")):
             r = await screenshots.capture_and_analyze("key")
             assert r["verdict"] == "neutral"
-
-
-class TestMonitorLifecycle:
-    def test_vision_inactive_by_default(self):
-        assert screenshots.is_vision_active() is False
-
-    def test_stop_when_not_running(self):
-        screenshots.stop_vision_monitor()
-        assert screenshots.is_vision_active() is False
-
-    def test_start_sets_active(self, conn):
-        with patch("sentinel.screenshots.threading.Thread") as mock_thread:
-            mock_thread.return_value = MagicMock()
-            screenshots.start_vision_monitor(conn, "key", interval=1)
-            assert screenshots.is_vision_active() is True
-        screenshots.stop_vision_monitor()
-
-    def test_double_start_noop(self, conn):
-        with patch("sentinel.screenshots.threading.Thread") as mock_thread:
-            mock_thread.return_value = MagicMock()
-            screenshots.start_vision_monitor(conn, "key", interval=1)
-            screenshots.start_vision_monitor(conn, "key", interval=1)
-            assert mock_thread.call_count == 1
-        screenshots.stop_vision_monitor()
-
-    @pytest.mark.asyncio
-    async def test_monitor_with_vision_stores_verdict(self, conn):
-        with patch("sentinel.screenshots.capture_and_analyze",
-                   new=AsyncMock(return_value={"verdict": "distracted", "details": "reddit"})):
-            r = await screenshots.monitor_with_vision(conn, "key")
-            assert r["verdict"] == "distracted"
-            assert "ts" in r
-            assert screenshots.get_last_verdict()["verdict"] == "distracted"

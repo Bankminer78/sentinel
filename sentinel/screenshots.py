@@ -1,9 +1,18 @@
-"""Periodic screenshot analysis via Gemini vision."""
-import subprocess, base64, json, threading, time, httpx
+"""One-shot screenshot + Gemini vision wrapper.
 
-_vision_thread = None
-_vision_running = False
-_last_verdict = {"verdict": "neutral", "details": "", "ts": 0}
+This module exists for the ``POST /vision/snapshot`` REST endpoint, which
+gives the GUI (and external Claude) a synchronous way to test vision
+without authoring a trigger. Inside trigger recipes, the agent should use
+the ``vision_check`` macro instead — it desugars to screen_capture +
+http_fetch + jsonpath via the new primitive layer.
+
+The background-monitor thread that used to live here was unused dead
+code (no caller in the daemon and the trigger system handles scheduling).
+Removed in Phase 5 of the primitive refactor.
+"""
+import base64, json, subprocess
+import httpx
+
 
 VISION_PROMPT = (
     "Look at this screenshot. Is the user doing productive work or getting distracted? "
@@ -60,48 +69,3 @@ async def capture_and_analyze(api_key: str, user_context: str = "") -> dict:
     if not raw:
         return {"verdict": "neutral", "details": "no response"}
     return _parse_verdict(raw)
-
-
-async def monitor_with_vision(conn, api_key: str, interval: int = 120) -> dict:
-    """Single vision check — stores verdict and returns it."""
-    global _last_verdict
-    result = await capture_and_analyze(api_key, "")
-    result["ts"] = time.time()
-    _last_verdict = result
-    return result
-
-
-def start_vision_monitor(conn, api_key: str, interval: int = 120):
-    """Background thread that periodically captures + analyzes."""
-    global _vision_thread, _vision_running
-    if _vision_running:
-        return
-    _vision_running = True
-
-    def _loop():
-        import asyncio
-        while _vision_running:
-            try:
-                asyncio.run(monitor_with_vision(conn, api_key, interval))
-            except Exception:
-                pass
-            for _ in range(interval):
-                if not _vision_running:
-                    break
-                time.sleep(1)
-
-    _vision_thread = threading.Thread(target=_loop, daemon=True)
-    _vision_thread.start()
-
-
-def stop_vision_monitor():
-    global _vision_running
-    _vision_running = False
-
-
-def is_vision_active() -> bool:
-    return _vision_running
-
-
-def get_last_verdict() -> dict:
-    return dict(_last_verdict)
