@@ -5,7 +5,7 @@ A lean, AI-native accountability app for macOS.
 You interact through a native macOS GUI. Your external AI agents (your personal Claude, etc.) interact through a local REST API. The app keeps a small, sharp core of features that can't be done by an AI; everything else is a generic store the AI can use freely.
 
 ```
-17 Python modules · 413 tests · 2,790 LoC · native macOS app
+18 Python modules · 477 tests · 3,240 LoC · native macOS app
 ```
 
 ## What it does
@@ -15,6 +15,7 @@ You interact through a native macOS GUI. Your external AI agents (your personal 
 - **Common productivity** — pomodoro and locked focus sessions. That's it. No kanban, no journal, no habit tracker — your AI can build those on top.
 - **AI Q&A** — ask questions about your data in plain English.
 - **AI-Authored Triggers** — describe a feature in plain English, the internal Gemini agent writes a trigger recipe, Sentinel runs it on a schedule. No code, no shipped module.
+- **Locks (commitment primitive)** — the Cold Turkey "I genuinely can't disable this" feature, but as a generic primitive. Lock any operation (`no_unblock_domain`, `no_delete_trigger`, or any custom kind the agent invents) for a duration. Optional friction gate for early release: wait N seconds, or type N random characters. Locks outlive the trigger that created them.
 - **Generic AI Store** — a key/value + document store the AI can use to track anything (habits, notes, custom metrics) without you having to ship a feature for it.
 - **macOS GUI** — a native menu-bar app with a WKWebView dashboard.
 - **REST API** — everything the GUI does, your external agents can do too.
@@ -146,6 +147,7 @@ docs = httpx.get(f"{SENTINEL}/ai/docs?namespace=habits").json()
 |---|---|
 | `ai_store` | **Generic K/V + document store** — namespaced, the agent's scratchpad |
 | `triggers` | **AI-authored features** — DSL recipes the internal Gemini writes from English, runs on a schedule, with run history + revise-on-failure feedback |
+| `locks` | **Commitment primitive** — write-once locks with optional friction gates. Built-in kinds (`no_unblock_domain`, `no_unblock_app`, `no_delete_trigger`, `no_disable_trigger`) are enforced by the runtime; custom kinds are enforced by the agent via `is_locked()` checks |
 
 **Views & utilities**:
 | Module | Purpose |

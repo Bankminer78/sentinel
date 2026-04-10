@@ -14,9 +14,21 @@ def block_domain(domain: str):
     _sync_hosts()
 
 
-def unblock_domain(domain: str):
+def unblock_domain(domain: str, conn=None, force: bool = False) -> bool:
+    """Remove a domain from the block list. Returns True on success.
+
+    Honors locks: if a ``no_unblock_domain`` lock covers this domain, the
+    request is refused and the function returns False unless ``force=True``.
+    Pass ``conn`` from the server or trigger context so the lock check can
+    run; without it, the lock layer is bypassed (used by tests / startup).
+    """
+    if conn is not None and not force:
+        from . import locks  # lazy: avoid circular import
+        if locks.is_locked(conn, "no_unblock_domain", domain):
+            return False
     _blocked_domains.discard(domain)
     _sync_hosts()
+    return True
 
 
 def block_app(bundle_id: str):
@@ -25,8 +37,14 @@ def block_app(bundle_id: str):
     kill_app(bundle_id)
 
 
-def unblock_app(bundle_id: str):
+def unblock_app(bundle_id: str, conn=None, force: bool = False) -> bool:
+    """Remove an app from the block list. Honors ``no_unblock_app`` locks."""
+    if conn is not None and not force:
+        from . import locks
+        if locks.is_locked(conn, "no_unblock_app", bundle_id):
+            return False
     _blocked_apps.discard(bundle_id)
+    return True
 
 
 def kill_app(bundle_id: str):

@@ -36,7 +36,10 @@ from __future__ import annotations
 import json, time, threading, asyncio, re, traceback
 from typing import Any, Callable
 
-from . import db as db_mod, ai_store, blocker, monitor, stats as stats_mod, screenshots
+from . import (
+    db as db_mod, ai_store, blocker, monitor, stats as stats_mod,
+    screenshots, locks as locks_mod,
+)
 
 # --- Schema ---
 
@@ -106,16 +109,29 @@ def list_all(conn) -> list:
     return [_row_to_dict(r) for r in rows]
 
 
-def delete(conn, name: str):
+def delete(conn, name: str, force: bool = False) -> bool:
+    """Delete a trigger. Returns False if a no_delete_trigger lock blocks it."""
     _ensure_table(conn)
+    if not force:
+        from . import locks
+        if locks.is_locked(conn, "no_delete_trigger", name):
+            return False
     conn.execute("DELETE FROM agent_triggers WHERE name=?", (name,))
     conn.commit()
+    return True
 
 
-def set_enabled(conn, name: str, enabled: bool):
+def set_enabled(conn, name: str, enabled: bool, force: bool = False) -> bool:
+    """Toggle a trigger. Disabling is gated by no_disable_trigger locks."""
     _ensure_table(conn)
-    conn.execute("UPDATE agent_triggers SET enabled=? WHERE name=?", (1 if enabled else 0, name))
+    if not enabled and not force:
+        from . import locks
+        if locks.is_locked(conn, "no_disable_trigger", name):
+            return False
+    conn.execute("UPDATE agent_triggers SET enabled=? WHERE name=?",
+                 (1 if enabled else 0, name))
     conn.commit()
+    return True
 
 
 def _row_to_dict(r) -> dict:
@@ -262,8 +278,36 @@ def _call_unblock_domain(conn, args, ctx):
     domain = args.get("domain", "").strip()
     if not domain:
         return {"ok": False, "reason": "no domain"}
-    blocker.unblock_domain(domain)
+    if not blocker.unblock_domain(domain, conn=conn):
+        return {"ok": False, "reason": "locked"}
     return {"ok": True, "domain": domain}
+
+
+def _call_create_lock(conn, args, ctx):
+    name = args.get("name") or ctx.get("name") or "unnamed"
+    kind = args.get("kind")
+    target = args.get("target")
+    duration = args.get("duration_seconds")
+    friction = args.get("friction")
+    if not kind or not duration:
+        return {"ok": False, "reason": "kind and duration_seconds required"}
+    try:
+        lid = locks_mod.create(conn, name, kind, target, int(duration), friction)
+        return {"ok": True, "id": lid, "kind": kind, "target": target}
+    except ValueError as e:
+        return {"ok": False, "reason": str(e)}
+
+
+def _call_is_locked(conn, args, ctx):
+    kind = args.get("kind")
+    target = args.get("target")
+    if not kind:
+        return {"locked": False, "reason": "kind required"}
+    return {"locked": locks_mod.is_locked(conn, kind, target)}
+
+
+def _call_list_locks(conn, args, ctx):
+    return locks_mod.list_active(conn, kind=args.get("kind"))
 
 
 def _call_get_score(conn, args, ctx):
@@ -335,6 +379,9 @@ CALLS: dict[str, Callable] = {
     "doc_add": _call_doc_add,
     "now": _call_now,
     "log": _call_log,
+    "create_lock": _call_create_lock,
+    "is_locked": _call_is_locked,
+    "list_locks": _call_list_locks,
 }
 
 
@@ -355,6 +402,16 @@ def list_calls() -> dict:
         "doc_add": "args:{namespace,doc,tags?} → {id:int}",
         "now": "args:{} → {hour,minute,weekday,day:str,ts:float}",
         "log": "args:{message} → {ok:true}  // appends to trigger_log:{trigger_name}",
+        "create_lock": (
+            "args:{name?,kind,target?,duration_seconds,friction?} → {ok,id,kind,target}"
+            "  // creates a commitment that nothing can undo before expiry."
+            "  Built-in kinds: 'no_unblock_domain','no_unblock_app',"
+            "'no_delete_trigger','no_disable_trigger'. Custom kinds work too —"
+            " agent enforces those via is_locked checks."
+            " friction examples: {type:'wait',seconds:600} or {type:'type_text',chars:200}"
+        ),
+        "is_locked": "args:{kind,target?} → {locked:bool}  // is any active lock matching this?",
+        "list_locks": "args:{kind?} → [lock,...]  // active locks, optionally filtered by kind",
     }
 
 
@@ -570,6 +627,7 @@ def start_worker(conn, tick_sec: float = 5.0):
         def loop():
             while _worker_running:
                 try:
+                    locks_mod.cleanup_expired(conn)
                     for t in due_triggers(conn):
                         if not _worker_running:
                             break

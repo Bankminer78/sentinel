@@ -17,7 +17,7 @@ from . import (
     db, classifier, monitor, blocker, skiplist, persistence,
     stats as stats_mod, query as query_mod, ai_store, screenshots,
     privacy as privacy_mod, backup as backup_mod, ui,
-    triggers as triggers_mod,
+    triggers as triggers_mod, locks as locks_mod,
 )
 
 app = FastAPI(title="Sentinel")
@@ -195,7 +195,11 @@ def manual_block(domain: str):
 
 @app.delete("/block/{domain}")
 def manual_unblock(domain: str):
-    blocker.unblock_domain(domain)
+    if not blocker.unblock_domain(domain, conn=get_conn()):
+        raise HTTPException(423, {
+            "message": "domain is locked — cannot unblock until lock expires",
+            "locks": locks_mod.list_active(get_conn(), kind="no_unblock_domain"),
+        })
     return {"ok": True}
 
 
@@ -379,7 +383,8 @@ def triggers_get(name: str):
 
 @app.delete("/triggers/{name}")
 def triggers_delete(name: str):
-    triggers_mod.delete(get_conn(), name)
+    if not triggers_mod.delete(get_conn(), name):
+        raise HTTPException(423, "trigger is locked — cannot delete until lock expires")
     return {"ok": True}
 
 
@@ -389,7 +394,8 @@ def triggers_toggle(name: str):
     if not t:
         raise HTTPException(404, "not found")
     new = not bool(t.get("enabled"))
-    triggers_mod.set_enabled(get_conn(), name, new)
+    if not triggers_mod.set_enabled(get_conn(), name, new):
+        raise HTTPException(423, "trigger is locked — cannot disable until lock expires")
     return {"ok": True, "enabled": new}
 
 
@@ -406,6 +412,62 @@ def triggers_runs(name: str, limit: int = 10):
 @app.get("/triggers/{name}/health")
 def triggers_health(name: str):
     return triggers_mod.health(get_conn(), name)
+
+
+# --- Locks (commitments + friction-gated early release) ---
+class LockCreate(BaseModel):
+    name: str
+    kind: str
+    target: Optional[str] = None
+    duration_seconds: int
+    friction: Optional[dict] = None
+
+
+class ChallengeResponse(BaseModel):
+    token: str
+    response: Optional[str] = None
+
+
+@app.post("/locks")
+def locks_create(body: LockCreate):
+    try:
+        lid = locks_mod.create(get_conn(), body.name, body.kind, body.target,
+                               body.duration_seconds, body.friction)
+        return {"id": lid, "name": body.name, "kind": body.kind}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/locks")
+def locks_list(kind: Optional[str] = None, include_inactive: bool = False):
+    if include_inactive:
+        return locks_mod.list_all(get_conn())
+    return locks_mod.list_active(get_conn(), kind=kind)
+
+
+@app.get("/locks/{lock_id}")
+def locks_get(lock_id: int):
+    lk = locks_mod.get(get_conn(), lock_id)
+    if not lk:
+        raise HTTPException(404, "not found")
+    return lk
+
+
+@app.delete("/locks/{lock_id}")
+def locks_delete(lock_id: int):
+    if not locks_mod.delete(get_conn(), lock_id):
+        raise HTTPException(423, "lock is still active — cannot delete")
+    return {"ok": True}
+
+
+@app.post("/locks/{lock_id}/release")
+def locks_request_release(lock_id: int):
+    return locks_mod.request_release(get_conn(), lock_id)
+
+
+@app.post("/locks/{lock_id}/complete")
+def locks_complete_release(lock_id: int, body: ChallengeResponse):
+    return locks_mod.complete_release(get_conn(), lock_id, body.token, body.response)
 
 
 @app.post("/triggers/author")
