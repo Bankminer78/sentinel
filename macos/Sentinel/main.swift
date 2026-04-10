@@ -248,9 +248,10 @@ final class LockoutManager {
 
 // MARK: - AppDelegate
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     var statusItem: NSStatusItem!
     var window: NSWindow?
+    var webView: WKWebView?
     let daemon = DaemonManager()
     let lockout = LockoutManager()
 
@@ -258,20 +259,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Don't show in dock — menu bar app
         NSApp.setActivationPolicy(.accessory)
 
-        // Status bar item
+        // Status bar item — left-click opens the dashboard, right-click shows
+        // the menu. This avoids forcing the user through Open Dashboard every
+        // time they want the window.
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
             button.title = "🛡"
             button.target = self
-            button.action = #selector(toggleWindow)
+            button.action = #selector(statusBarClick)
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
-
-        let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Open Dashboard", action: #selector(toggleWindow), keyEquivalent: "o"))
-        menu.addItem(NSMenuItem(title: "Reload", action: #selector(reload), keyEquivalent: "r"))
-        menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Quit Sentinel", action: #selector(quit), keyEquivalent: "q"))
-        statusItem.menu = menu
 
         // Start daemon
         daemon.start()
@@ -286,9 +283,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Re-opens the dashboard when the user clicks Sentinel.app while it's
+    /// already running. Without this, double-clicking the .app does nothing
+    /// visible because the existing instance just refocuses with no window.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {
+            openWindow()
+        }
+        return true
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         daemon.stop()
     }
+
+    /// Left-click → toggle dashboard. Right-click (or control-click) → menu.
+    @objc func statusBarClick() {
+        guard let event = NSApp.currentEvent else {
+            toggleWindow()
+            return
+        }
+        if event.type == .rightMouseUp || event.modifierFlags.contains(.control) {
+            // Show the menu by attaching it temporarily
+            let menu = NSMenu()
+            menu.addItem(NSMenuItem(title: "Open Dashboard", action: #selector(openWindowAction), keyEquivalent: "o"))
+            menu.addItem(NSMenuItem(title: "Reload", action: #selector(reload), keyEquivalent: "r"))
+            menu.addItem(.separator())
+            menu.addItem(NSMenuItem(title: "Quit Sentinel", action: #selector(quit), keyEquivalent: "q"))
+            statusItem.menu = menu
+            statusItem.button?.performClick(nil)
+            // Detach so the next left-click runs the action again
+            statusItem.menu = nil
+        } else {
+            toggleWindow()
+        }
+    }
+
+    @objc func openWindowAction() { openWindow() }
 
     @objc func toggleWindow() {
         if let w = window, w.isVisible {
@@ -312,23 +343,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             w.isReleasedWhenClosed = false
 
             let config = WKWebViewConfiguration()
-            let webView = WKWebView(frame: w.contentView!.bounds, configuration: config)
-            webView.autoresizingMask = [.width, .height]
-            webView.setValue(false, forKey: "drawsBackground")
-            w.contentView?.addSubview(webView)
+            let wv = WKWebView(frame: w.contentView!.bounds, configuration: config)
+            wv.autoresizingMask = [.width, .height]
+            wv.setValue(false, forKey: "drawsBackground")
+            wv.navigationDelegate = self
+            w.contentView?.addSubview(wv)
 
             if let url = URL(string: SERVER_URL) {
-                webView.load(URLRequest(url: url))
+                wv.load(URLRequest(url: url))
             }
+            self.webView = wv
             window = w
+        } else if let wv = self.webView {
+            // Window exists. If the page is in an error state (e.g., the
+            // daemon was killed and the WKWebView is showing
+            // ERR_CONNECTION_REFUSED), reload it.
+            if wv.url == nil || wv.url?.absoluteString == "about:blank" {
+                if let url = URL(string: SERVER_URL) {
+                    wv.load(URLRequest(url: url))
+                }
+            }
         }
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
     }
 
+    // MARK: - WKNavigationDelegate (auto-recover from page-load failures)
+
+    func webView(_ wv: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        debugLog("webView didFailProvisionalNavigation: \(error.localizedDescription)")
+        // The most common cause is the daemon not yet ready. Retry once after
+        // a short delay so the user doesn't see a blank/error page.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self = self, let url = URL(string: SERVER_URL) else { return }
+            wv.load(URLRequest(url: url))
+        }
+    }
+
+    func webView(_ wv: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        debugLog("webView didFail: \(error.localizedDescription)")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self = self, let url = URL(string: SERVER_URL) else { return }
+            wv.load(URLRequest(url: url))
+        }
+    }
+
     @objc func reload() {
-        if let w = window, let webView = w.contentView?.subviews.compactMap({ $0 as? WKWebView }).first {
-            webView.reload()
+        // Force a fresh fetch of the daemon's HTML, not just a cached reload
+        if let wv = self.webView, let url = URL(string: SERVER_URL) {
+            wv.load(URLRequest(url: url))
         }
     }
 
