@@ -94,7 +94,7 @@ def test_count_since_filter(conn):
 def test_cleanup_deletes_old_rows(conn):
     audit.log(conn, "user", "old", {})
     # Backdate
-    conn.execute("UPDATE audit_log SET ts=? WHERE 1=1", (time.time() - 86400 * 30,))
+    conn.execute("UPDATE agent_audit_log SET ts=? WHERE 1=1", (time.time() - 86400 * 30,))
     conn.commit()
     audit.log(conn, "user", "new", {})
     cutoff = time.time() - 86400  # delete anything older than 1 day
@@ -107,7 +107,7 @@ def test_cleanup_deletes_old_rows(conn):
 def test_cleanup_refused_when_lock_active(conn):
     audit.log(conn, "user", "x", {})
     # Backdate ALL existing rows to 30 days ago so they would be cleanup-eligible
-    conn.execute("UPDATE audit_log SET ts=? WHERE 1=1", (time.time() - 86400 * 30,))
+    conn.execute("UPDATE agent_audit_log SET ts=? WHERE 1=1", (time.time() - 86400 * 30,))
     conn.commit()
     before_count = audit.count(conn)
     locks.create(conn, "audit lock", "no_delete_audit", target=None,
@@ -123,7 +123,7 @@ def test_cleanup_refused_when_lock_active(conn):
 
 def test_cleanup_works_after_lock_expires(conn):
     audit.log(conn, "user", "x", {})
-    conn.execute("UPDATE audit_log SET ts=? WHERE 1=1", (time.time() - 86400 * 30,))
+    conn.execute("UPDATE agent_audit_log SET ts=? WHERE 1=1", (time.time() - 86400 * 30,))
     conn.commit()
     lid = locks.create(conn, "audit lock", "no_delete_audit", target=None,
                        duration_seconds=3600)

@@ -20,7 +20,8 @@ from . import (
     triggers as triggers_mod, locks as locks_mod,
     imessage as imessage_mod, notify as notify_mod,
     screen as screen_mod, emergency as emergency_mod,
-    audit as audit_mod,
+    audit as audit_mod, sandbox as sandbox_mod,
+    primitives as primitives_mod,
 )
 
 app = FastAPI(title="Sentinel")
@@ -42,6 +43,11 @@ def startup():
     monitor.start()
     persistence.start_watcher()
     triggers_mod.start_worker(conn)
+    # Tell the http_fetch primitive which port we're on so it can refuse
+    # the agent calling its own admin endpoints. The CLI passes the port
+    # via the SENTINEL_PORT env var; default to 9849.
+    import os as _os
+    primitives_mod.register_daemon_port(int(_os.environ.get("SENTINEL_PORT", "9849")))
 
 
 @app.on_event("shutdown")
@@ -339,6 +345,47 @@ def backup_create():
 @app.get("/backups")
 def backups_list():
     return backup_mod.list_backups()
+
+
+# --- Sandbox allowlists (gated by no_modify_allowlist lock) ---
+class HttpAllowlistBody(BaseModel):
+    hosts: list
+
+
+class SqlAllowlistBody(BaseModel):
+    paths: list
+
+
+@app.get("/sandbox/http-allowlist")
+def get_http_allowlist():
+    return {"hosts": sandbox_mod.get_http_allowlist(get_conn())}
+
+
+@app.post("/sandbox/http-allowlist")
+def set_http_allowlist(body: HttpAllowlistBody):
+    try:
+        sandbox_mod.set_http_allowlist(get_conn(), body.hosts)
+        return {"ok": True, "hosts": sandbox_mod.get_http_allowlist(get_conn())}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except PermissionError as e:
+        raise HTTPException(423, str(e))
+
+
+@app.get("/sandbox/sql-allowlist")
+def get_sql_allowlist():
+    return {"paths": sandbox_mod.get_sql_allowlist(get_conn())}
+
+
+@app.post("/sandbox/sql-allowlist")
+def set_sql_allowlist(body: SqlAllowlistBody):
+    try:
+        sandbox_mod.set_sql_allowlist(get_conn(), body.paths)
+        return {"ok": True, "paths": sandbox_mod.get_sql_allowlist(get_conn())}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except PermissionError as e:
+        raise HTTPException(423, str(e))
 
 
 # --- Audit log (append-only, gated by no_delete_audit lock) ---

@@ -13,7 +13,10 @@ def cli():
 @click.option("--host", default="127.0.0.1", help="Host")
 def serve(port, host):
     """Start the Sentinel server."""
-    import uvicorn
+    import os, uvicorn
+    # Pass the port through the env so the server's startup hook can register
+    # it with the http_fetch SSRF self-call defense.
+    os.environ["SENTINEL_PORT"] = str(port)
     uvicorn.run("sentinel.server:app", host=host, port=port, log_level="info")
 
 

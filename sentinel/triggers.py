@@ -40,6 +40,7 @@ from . import (
     db as db_mod, ai_store, blocker, monitor, stats as stats_mod,
     screenshots, locks as locks_mod, notify as notify_mod,
     imessage as imessage_mod, screen as screen_mod, emergency as emergency_mod,
+    primitives as primitives_mod,
 )
 
 # --- Schema ---
@@ -204,10 +205,21 @@ _TEMPLATE_RE = re.compile(r"\$\{([a-zA-Z_][a-zA-Z0-9_.]*)\}")
 
 def _resolve_path(locals_dict: dict, path: str) -> Any:
     cur: Any = locals_dict
-    for part in path.split("."):
+    parts = path.split(".")
+    for i, part in enumerate(parts):
         if cur is None:
             return None
+        # Special case: blob.base64 on a blob_ref dict — auto-encode the bytes.
+        # The blob_ref's "_bytes" field is consumed here so the value is never
+        # exposed as raw bytes to the recipe author.
+        if part == "base64" and isinstance(cur, dict) and "_blob" in cur and "_bytes" in cur:
+            from . import primitives as _p
+            return _p.base64_encode(cur)
         if isinstance(cur, dict):
+            # Hide the internal "_bytes" field from path traversal — only the
+            # blob.base64 path can read the bytes.
+            if part == "_bytes":
+                return None
             cur = cur.get(part)
         elif isinstance(cur, (list, tuple)):
             try:
@@ -388,6 +400,50 @@ def _call_emergency_remaining(conn, args, ctx):
     return emergency_mod.status(conn)
 
 
+# --- Generic primitives (the agent's building blocks) ---
+
+def _call_http_fetch(conn, args, ctx):
+    return primitives_mod.http_fetch(
+        conn,
+        method=args.get("method", "GET"),
+        url=args.get("url", ""),
+        headers=args.get("headers"),
+        body=args.get("body"),
+        timeout=args.get("timeout", 30),
+        actor=f"trigger:{ctx.get('name', '?')}",
+    )
+
+
+def _call_sql_query(conn, args, ctx):
+    return primitives_mod.sql_query(
+        conn,
+        db_path=args.get("db_path", ""),
+        sql=args.get("sql", ""),
+        params=args.get("params") or [],
+        actor=f"trigger:{ctx.get('name', '?')}",
+    )
+
+
+def _call_jsonpath(conn, args, ctx):
+    return primitives_mod.jsonpath(args.get("value"), args.get("path", ""))
+
+
+def _call_screen_capture(conn, args, ctx):
+    return primitives_mod.screen_capture(
+        conn, actor=f"trigger:{ctx.get('name', '?')}")
+
+
+def _call_regex_match(conn, args, ctx):
+    return primitives_mod.regex_match(
+        args.get("text", ""),
+        args.get("pattern", ""),
+        group=int(args.get("group", 0)))
+
+
+def _call_base64_encode(conn, args, ctx):
+    return {"value": primitives_mod.base64_encode(args.get("value"))}
+
+
 def _call_get_score(conn, args, ctx):
     return {"score": stats_mod.calculate_score(conn)}
 
@@ -468,6 +524,13 @@ CALLS: dict[str, Callable] = {
     "lock_screen": _call_lock_screen,
     "is_screen_locked": _call_is_screen_locked,
     "emergency_remaining": _call_emergency_remaining,
+    # Generic primitives — the agent's building blocks
+    "http_fetch": _call_http_fetch,
+    "sql_query": _call_sql_query,
+    "jsonpath": _call_jsonpath,
+    "screen_capture": _call_screen_capture,
+    "regex_match": _call_regex_match,
+    "base64_encode": _call_base64_encode,
 }
 
 
@@ -530,6 +593,39 @@ def list_calls() -> dict:
             "args:{} → {limit,used_this_month,remaining,month_start_ts}"
             "  // read-only — agent CANNOT trigger an exit, only the user can"
         ),
+        # --- Generic primitives ---
+        "http_fetch": (
+            "args:{method,url,headers?,body?,timeout?} → {ok,status,headers,body_text,json?}"
+            "  // HTTP request to an allowlisted host. Defaults: GET, 30s timeout."
+            " On failure: {ok:false, reason_code: invalid_method|bad_url|host_not_allowed|"
+            "ssrf_blocked|daemon_self_call|dns_failed|timeout|http_error|body_too_large}."
+            " body can be a dict (auto-JSON) or a ${snap.base64} blob ref."
+        ),
+        "sql_query": (
+            "args:{db_path,sql,params?} → {ok,rows,row_count}"
+            "  // Read-only single-statement SQL against an allowlisted SQLite file."
+            " Use ? placeholders + params list — never string-format user values into sql."
+            " On failure: {ok:false, reason_code: path_not_allowed|multi_statement|"
+            "sqlite_error|too_many_rows|bad_sql|bad_params}."
+        ),
+        "jsonpath": (
+            "args:{value,path} → {ok,value} | {ok:false,reason_code:path_missing}"
+            "  // Extract a nested value via dot/bracket path: 'foo.bar.0' or 'foo[0].bar'."
+            " Use this on http_fetch.json to pull out specific fields."
+        ),
+        "screen_capture": (
+            "args:{} → {ok, blob:{_blob,size,mime}} | {ok:false, reason_code}"
+            "  // Take a screenshot. Returns a blob_ref the executor stores in locals."
+            " Pass it to http_fetch via ${cap.blob.base64} (auto-base64-encodes the bytes)."
+        ),
+        "regex_match": (
+            "args:{text,pattern,group?} → {ok,match} | {ok:false,reason_code}"
+            "  // Single regex match. group=0 returns the full match."
+        ),
+        "base64_encode": (
+            "args:{value} → {value:str}"
+            "  // Base64-encode a string or a blob_ref's bytes."
+        ),
     }
 
 
@@ -546,11 +642,18 @@ def _step_status(result: Any) -> str:
 
 
 def _summarize(value: Any, max_len: int = 200) -> str:
-    """Compact JSON of a value, truncated for run-log storage."""
+    """Compact JSON of a value, truncated for run-log storage.
+
+    Blob ``_bytes`` fields are replaced with a length tag before serializing
+    so binary data never appears in the persisted run log or the audit
+    trail. The summary is what the run-history debugger UI shows the user;
+    it must be safe to render and store.
+    """
+    safe = _strip_blob_bytes(value)
     try:
-        s = json.dumps(value, default=str)
+        s = json.dumps(safe, default=str)
     except Exception:
-        s = str(value)
+        s = str(safe)
     return s if len(s) <= max_len else s[:max_len] + "…"
 
 
@@ -636,15 +739,38 @@ def _execute_steps(conn, steps: list, locals_dict: dict, ctx: dict,
     return run_log
 
 
+def _strip_blob_bytes(value):
+    """Recursively replace blob_ref ``_bytes`` fields with a length tag.
+
+    Used before any JSON serialization (audit, run history, revise prompt)
+    so blob bytes never leak into persistent storage or the LLM.
+    """
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            if k == "_bytes" and isinstance(v, (bytes, bytearray)):
+                out["_bytes_len"] = len(v)
+            else:
+                out[k] = _strip_blob_bytes(v)
+        return out
+    if isinstance(value, list):
+        return [_strip_blob_bytes(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_strip_blob_bytes(v) for v in value)
+    return value
+
+
 def _record_run(conn, name: str, started_at: float, duration_ms: float,
                 status: str, error: str | None, locals_dict: dict, run_log: list):
+    safe_locals = _strip_blob_bytes(locals_dict)
+    safe_run_log = _strip_blob_bytes(run_log)
     conn.execute(
         "INSERT INTO agent_trigger_runs "
         "(trigger_name, started_at, duration_ms, status, error, locals, steps) "
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
         (name, started_at, duration_ms, status, error,
-         json.dumps(locals_dict, default=str)[:5000],
-         json.dumps(run_log, default=str)[:5000]))
+         json.dumps(safe_locals, default=str)[:5000],
+         json.dumps(safe_run_log, default=str)[:5000]))
     # Trim to last RUN_HISTORY_KEEP rows for this trigger.
     conn.execute(
         "DELETE FROM agent_trigger_runs WHERE trigger_name=? AND id NOT IN "

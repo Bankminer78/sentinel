@@ -32,7 +32,7 @@ import time
 
 
 def _ensure_table(conn):
-    conn.execute("""CREATE TABLE IF NOT EXISTS audit_log (
+    conn.execute("""CREATE TABLE IF NOT EXISTS agent_audit_log (
         id INTEGER PRIMARY KEY,
         ts REAL NOT NULL,
         actor TEXT NOT NULL,
@@ -40,9 +40,9 @@ def _ensure_table(conn):
         args_summary TEXT,
         result_status TEXT
     )""")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log(ts DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_audit_log_ts ON agent_audit_log(ts DESC)")
     conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_audit_log_primitive ON audit_log(primitive)")
+        "CREATE INDEX IF NOT EXISTS idx_agent_audit_log_primitive ON agent_audit_log(primitive)")
 
 
 # --- Append (the only mutating operation) ---
@@ -61,7 +61,7 @@ def log(conn, actor: str, primitive: str, args: dict | None = None,
     _ensure_table(conn)
     args_json = json.dumps(args or {}, default=str)[:2000]
     conn.execute(
-        "INSERT INTO audit_log (ts, actor, primitive, args_summary, result_status) "
+        "INSERT INTO agent_audit_log (ts, actor, primitive, args_summary, result_status) "
         "VALUES (?, ?, ?, ?, ?)",
         (time.time(), actor, primitive, args_json, status))
     conn.commit()
@@ -72,7 +72,7 @@ def log(conn, actor: str, primitive: str, args: dict | None = None,
 def list_recent(conn, limit: int = 100, primitive: str | None = None,
                 actor: str | None = None) -> list:
     _ensure_table(conn)
-    q = "SELECT * FROM audit_log WHERE 1=1"
+    q = "SELECT * FROM agent_audit_log WHERE 1=1"
     params: list = []
     if primitive:
         q += " AND primitive = ?"
@@ -90,9 +90,9 @@ def count(conn, since: float | None = None) -> int:
     _ensure_table(conn)
     if since is not None:
         r = conn.execute(
-            "SELECT COUNT(*) AS c FROM audit_log WHERE ts >= ?", (since,)).fetchone()
+            "SELECT COUNT(*) AS c FROM agent_audit_log WHERE ts >= ?", (since,)).fetchone()
     else:
-        r = conn.execute("SELECT COUNT(*) AS c FROM audit_log").fetchone()
+        r = conn.execute("SELECT COUNT(*) AS c FROM agent_audit_log").fetchone()
     return r["c"]
 
 
@@ -109,7 +109,7 @@ def cleanup_older_than(conn, cutoff_ts: float) -> dict:
     from . import locks
     if locks.is_locked(conn, "no_delete_audit"):
         return {"ok": False, "reason": "no_delete_audit lock is active"}
-    cur = conn.execute("DELETE FROM audit_log WHERE ts < ?", (cutoff_ts,))
+    cur = conn.execute("DELETE FROM agent_audit_log WHERE ts < ?", (cutoff_ts,))
     conn.commit()
     return {"ok": True, "deleted": cur.rowcount or 0}
 
