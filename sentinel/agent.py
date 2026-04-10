@@ -322,23 +322,23 @@ async def run_session(prompt: str, session_id: str | None = None,
                 elif ev_type == "message_stop":
                     current_message_streaming = False
             elif isinstance(msg, AssistantMessage):
-                for i, block in enumerate(msg.content):
+                for block in msg.content:
                     if isinstance(block, TextBlock):
-                        # If we already streamed this text via StreamEvent
-                        # deltas, don't re-emit the whole thing. Otherwise
-                        # (e.g. a tool that produces a synthetic message
-                        # without going through the streaming path), emit
-                        # the full text as a fallback.
-                        if i not in streamed_text_indices:
-                            yield {"type": "assistant_text",
-                                   "session_id": sid,
-                                   "text": block.text}
+                        # In streaming mode (include_partial_messages=True),
+                        # all text arrived via content_block_delta events
+                        # already. Don't re-emit the whole thing — that
+                        # causes the duplicate the user just saw. The
+                        # streamed_text_indices approach failed because
+                        # SDK content-block indices don't match Anthropic
+                        # API indices (the SDK filters out thinking blocks).
+                        # Skip unconditionally; worst case we miss a rare
+                        # non-streamed text block, which is acceptable.
+                        pass
                     elif isinstance(block, ToolUseBlock):
                         yield {"type": "tool_use",
                                "session_id": sid,
                                "tool": block.name,
                                "input": _truncate(block.input)}
-                # Reset the streaming-text tracker for the next message
                 streamed_text_indices.clear()
             elif isinstance(msg, UserMessage):
                 for block in msg.content:
@@ -365,7 +365,12 @@ async def run_session(prompt: str, session_id: str | None = None,
                 yield {"type": "rate_limit",
                        "session_id": sid,
                        "info": str(msg)[:300]}
-    except Exception as e:
+    except BaseException as e:
+        # BaseException catches ExceptionGroup (Python 3.11+ — extends
+        # BaseException, not Exception) which the SDK's internal TaskGroup
+        # can raise. Also catches KeyboardInterrupt, but that's fine here
+        # because we still want to yield the error event + write the audit
+        # entry before the generator closes.
         audit.log(conn, actor, "agent.session_errored",
                   {"exc_type": type(e).__name__,
                    "exc_msg": str(e)[:300]},
