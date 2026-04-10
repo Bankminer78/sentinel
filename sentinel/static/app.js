@@ -218,13 +218,20 @@ function handleSseFrame(raw) {
   renderAgentEvent(event);
 }
 
+// Track the last assistant_text we rendered so the final ResultMessage
+// (which carries the same text as the last AssistantMessage) doesn't
+// re-render it. The result event becomes a tiny "done + cost" marker.
+let lastAssistantText = '';
+
 function renderAgentEvent(event) {
   const t = event.type;
   if (t === 'session_started') {
+    lastAssistantText = '';
     appendChatEvent('assistant',
       '<div class="label">Session ' + escapeHtml(event.session_id) + '</div>' +
       '<span class="muted">started</span>');
   } else if (t === 'assistant_text') {
+    lastAssistantText = event.text || '';
     appendChatEvent('assistant',
       '<div class="label">Assistant</div>' + escapeHtml(event.text));
   } else if (t === 'tool_use') {
@@ -242,9 +249,22 @@ function renderAgentEvent(event) {
       '<span class="toggle-detail" data-action="toggle">Show output</span>' +
       '<div class="detail"><pre>' + escapeHtml(result) + '</pre></div>');
   } else if (t === 'result') {
-    const cost = event.cost_usd != null ? ' ($' + event.cost_usd.toFixed(4) + ')' : '';
-    appendChatEvent('result',
-      '<div class="label">Final' + cost + '</div>' + escapeHtml(event.result || ''));
+    // The SDK emits ResultMessage.result with the same text as the last
+    // AssistantMessage we already rendered. Only show the cost stamp +
+    // a "done" marker; suppress the duplicate text. If somehow the
+    // result text differs from the last assistant_text (e.g. there
+    // was no assistant_text at all), fall back to showing it.
+    const cost = event.cost_usd != null ? '$' + event.cost_usd.toFixed(4) : 'free';
+    const resultText = event.result || '';
+    const isDuplicate = resultText && resultText === lastAssistantText;
+    if (isDuplicate) {
+      appendChatEvent('result',
+        '<div class="label">Done · ' + escapeHtml(cost) + '</div>');
+    } else {
+      appendChatEvent('result',
+        '<div class="label">Final · ' + escapeHtml(cost) + '</div>' +
+        escapeHtml(resultText));
+    }
   } else if (t === 'rate_limit') {
     appendChatEvent('tool-use',
       '<div class="label">Rate limit</div><span class="muted">' +
