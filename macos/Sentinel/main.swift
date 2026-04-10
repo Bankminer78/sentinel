@@ -390,7 +390,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     /// wrote at startup, and inject it into the page as window.SENTINEL_TOKEN
     /// so the dashboard JS can include it in /api/agent/* requests.
     private func injectAgentToken(into wv: WKWebView) {
-        let tokenPath = "\(NSHomeDirectory())/Library/Application Support/Sentinel/agent.token"
+        let tokenPath = "\(NSHomeDirectory())/Library/Application Support/Sentinel/agent-\(SERVER_PORT).token"
         guard let token = try? String(contentsOfFile: tokenPath, encoding: .utf8)
                                     .trimmingCharacters(in: .whitespacesAndNewlines),
               !token.isEmpty else {

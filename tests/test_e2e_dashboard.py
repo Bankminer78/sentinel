@@ -49,7 +49,9 @@ pytestmark = [
 SENTINEL_DIR = Path(__file__).parent.parent
 DAEMON_PORT = 19849  # non-default port to avoid colliding with the real daemon
 DAEMON_URL = f"http://127.0.0.1:{DAEMON_PORT}"
-TOKEN_PATH = Path.home() / "Library" / "Application Support" / "Sentinel" / "agent.token"
+# Each daemon writes its token to a port-specific file so multiple daemons
+# (real .app on 9849, test on 19849) don't overwrite each other's tokens.
+TOKEN_PATH = Path.home() / "Library" / "Application Support" / "Sentinel" / f"agent-{DAEMON_PORT}.token"
 
 
 @pytest.fixture(scope="module")

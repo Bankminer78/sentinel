@@ -20,18 +20,20 @@ def serve(port, host):
     # it with the http_fetch SSRF self-call defense.
     os.environ["SENTINEL_PORT"] = str(port)
 
-    # Check if another daemon already owns the port. If so, don't overwrite
-    # the bearer token file — the existing daemon wrote it and the Swift app
-    # may have already injected it into the WKWebView. Overwriting would
-    # cause a 401 mismatch. Just exit cleanly and let the existing daemon
-    # keep serving.
+    # Check if another daemon is already SERVING on the port. Don't use
+    # bind-test (leaves the port in TIME_WAIT after close, blocks uvicorn).
+    # Instead, try to connect — if it succeeds, someone is listening.
     import socket as _sock
     try:
         with _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM) as s:
-            s.bind((host, port))
-    except OSError:
+            s.settimeout(0.5)
+            s.connect((host, port))
+        # Connection succeeded → a daemon is actively serving → exit
         click.echo(f"Port {port} is already in use — another Sentinel daemon is running. Exiting.")
         return
+    except (ConnectionRefusedError, OSError):
+        # No one is serving → port is free → proceed
+        pass
 
     # Generate a per-launch bearer token for the agent endpoint and write it
     # to a 0600 file the Swift app + GUI can read. Only processes running as
@@ -39,7 +41,7 @@ def serve(port, host):
     # any local malware that finds it.
     token_dir = Path.home() / "Library" / "Application Support" / "Sentinel"
     token_dir.mkdir(parents=True, exist_ok=True)
-    token_path = token_dir / "agent.token"
+    token_path = token_dir / f"agent-{port}.token"
     token = secrets.token_urlsafe(32)
     token_path.write_text(token)
     token_path.chmod(0o600)
