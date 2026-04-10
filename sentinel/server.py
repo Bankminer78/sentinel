@@ -770,12 +770,26 @@ async def agent_start(body: AgentRequest, authorization: Optional[str] = Header(
                 try:
                     queue.put_nowait(event)
                 except _asyncio.QueueFull:
-                    # GUI is slow draining; drop the oldest event and retry
                     try:
                         queue.get_nowait()
                     except _asyncio.QueueEmpty:
                         pass
                     queue.put_nowait(event)
+        except BaseException as e:
+            # The SDK's internal TaskGroup can raise ExceptionGroup which
+            # extends BaseException (not Exception) and leaks past
+            # run_session's own handler when the exception fires during
+            # a generator yield boundary. Catch it here so the GUI gets
+            # a clean error event instead of a raw crash.
+            try:
+                queue.put_nowait({
+                    "type": "error",
+                    "session_id": sid,
+                    "error_type": type(e).__name__,
+                    "message": str(e)[:500],
+                })
+            except Exception:
+                pass
         finally:
             try:
                 queue.put_nowait(_AGENT_SENTINEL)
