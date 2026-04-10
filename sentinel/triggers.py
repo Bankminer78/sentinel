@@ -36,7 +36,7 @@ from __future__ import annotations
 import json, time, threading, asyncio, re, traceback
 from typing import Any, Callable
 
-from . import db as db_mod, ai_store, blocker, monitor, stats as stats_mod, screenshots, scheduler
+from . import db as db_mod, ai_store, blocker, monitor, stats as stats_mod, screenshots
 
 # --- Schema ---
 
@@ -320,16 +320,6 @@ def _call_log(conn, args, ctx):
     return {"ok": True}
 
 
-def _call_start_focus(conn, args, ctx):
-    return scheduler.start_focus_session(
-        conn, int(args.get("duration_minutes", 60)), bool(args.get("locked", True)))
-
-
-def _call_in_focus(conn, args, ctx):
-    s = scheduler.get_focus_session(conn)
-    return {"active": bool(s), "session": s}
-
-
 CALLS: dict[str, Callable] = {
     "vision_check": _call_vision_check,
     "get_status": _call_get_status,
@@ -345,8 +335,6 @@ CALLS: dict[str, Callable] = {
     "doc_add": _call_doc_add,
     "now": _call_now,
     "log": _call_log,
-    "start_focus": _call_start_focus,
-    "in_focus": _call_in_focus,
 }
 
 
@@ -367,8 +355,6 @@ def list_calls() -> dict:
         "doc_add": "args:{namespace,doc,tags?} → {id:int}",
         "now": "args:{} → {hour,minute,weekday,day:str,ts:float}",
         "log": "args:{message} → {ok:true}  // appends to trigger_log:{trigger_name}",
-        "start_focus": "args:{duration_minutes?,locked?} → focus session dict",
-        "in_focus": "args:{} → {active:bool, session:dict|null}",
     }
 
 

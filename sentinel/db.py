@@ -1,4 +1,11 @@
-"""SQLite database — single file, all state."""
+"""SQLite — the box's storage substrate.
+
+Only primitives live here. Features (pomodoro, focus, goals, streaks,
+interventions, penalties, partners, allowances, chat history, audit log)
+used to have their own tables; they're all gone because triggers + ai_store
+can reproduce them. Module-local tables (ai_store, triggers) are created by
+those modules on first use.
+"""
 import sqlite3, json, time
 from pathlib import Path
 
@@ -29,45 +36,6 @@ def connect(path=None):
         );
         CREATE TABLE IF NOT EXISTS config (
             key TEXT PRIMARY KEY, value TEXT
-        );
-        CREATE TABLE IF NOT EXISTS pomodoro_sessions (
-            id INTEGER PRIMARY KEY, start_ts REAL,
-            work_minutes INTEGER, break_minutes INTEGER,
-            total_cycles INTEGER, current_cycle INTEGER DEFAULT 1,
-            state TEXT DEFAULT 'work', ended_at REAL
-        );
-        CREATE TABLE IF NOT EXISTS focus_sessions (
-            id INTEGER PRIMARY KEY, start_ts REAL,
-            duration_minutes INTEGER, locked INTEGER DEFAULT 1,
-            ended_at REAL
-        );
-        CREATE TABLE IF NOT EXISTS allowance_log (
-            id INTEGER PRIMARY KEY, rule_id INTEGER,
-            date TEXT, seconds_used INTEGER DEFAULT 0,
-            UNIQUE(rule_id, date)
-        );
-        CREATE TABLE IF NOT EXISTS interventions (
-            id INTEGER PRIMARY KEY, kind TEXT, context TEXT, state TEXT,
-            created_at REAL, completed_at REAL, passed INTEGER, attempts INTEGER DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS goals (
-            id INTEGER PRIMARY KEY, name TEXT, target_type TEXT,
-            target_value INTEGER, category TEXT, created_at REAL
-        );
-        CREATE TABLE IF NOT EXISTS streaks (
-            goal_name TEXT PRIMARY KEY, current INTEGER DEFAULT 0,
-            longest INTEGER DEFAULT 0, last_date TEXT
-        );
-        CREATE TABLE IF NOT EXISTS partners (
-            id INTEGER PRIMARY KEY, name TEXT, contact TEXT,
-            method TEXT DEFAULT 'webhook', created_at REAL
-        );
-        CREATE TABLE IF NOT EXISTS penalties (
-            id INTEGER PRIMARY KEY, rule_id INTEGER, amount REAL,
-            created_at REAL, paid INTEGER DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS penalty_rules (
-            rule_id INTEGER PRIMARY KEY, amount REAL
         );
     """)
     # Backfill duration_s column for pre-existing databases.
@@ -130,84 +98,3 @@ def get_config(conn, key, default=None):
 def set_config(conn, key, value):
     conn.execute("INSERT OR REPLACE INTO config (key,value) VALUES (?,?)", (key, value))
     conn.commit()
-
-# --- Pomodoro ---
-def save_pomodoro(conn, start_ts, work_minutes, break_minutes, total_cycles):
-    cur = conn.execute(
-        "INSERT INTO pomodoro_sessions (start_ts,work_minutes,break_minutes,total_cycles) VALUES (?,?,?,?)",
-        (start_ts, work_minutes, break_minutes, total_cycles))
-    conn.commit()
-    return cur.lastrowid
-
-def get_active_pomodoro(conn):
-    r = conn.execute(
-        "SELECT * FROM pomodoro_sessions WHERE ended_at IS NULL ORDER BY id DESC LIMIT 1"
-    ).fetchone()
-    return dict(r) if r else None
-
-def update_pomodoro(conn, pid, **fields):
-    if not fields:
-        return
-    cols = ",".join(f"{k}=?" for k in fields)
-    conn.execute(f"UPDATE pomodoro_sessions SET {cols} WHERE id=?", (*fields.values(), pid))
-    conn.commit()
-
-# --- Focus sessions ---
-def save_focus_session(conn, start_ts, duration_minutes, locked):
-    cur = conn.execute(
-        "INSERT INTO focus_sessions (start_ts,duration_minutes,locked) VALUES (?,?,?)",
-        (start_ts, duration_minutes, 1 if locked else 0))
-    conn.commit()
-    return cur.lastrowid
-
-def get_active_focus(conn):
-    r = conn.execute(
-        "SELECT * FROM focus_sessions WHERE ended_at IS NULL ORDER BY id DESC LIMIT 1"
-    ).fetchone()
-    return dict(r) if r else None
-
-def end_focus(conn, session_id, ended_at):
-    conn.execute("UPDATE focus_sessions SET ended_at=? WHERE id=?", (ended_at, session_id))
-    conn.commit()
-
-# --- Allowance log ---
-def add_allowance_use(conn, rule_id, date, seconds):
-    conn.execute(
-        "INSERT INTO allowance_log (rule_id,date,seconds_used) VALUES (?,?,?) "
-        "ON CONFLICT(rule_id,date) DO UPDATE SET seconds_used = seconds_used + ?",
-        (rule_id, date, seconds, seconds))
-    conn.commit()
-
-def get_allowance_used(conn, rule_id, date):
-    r = conn.execute(
-        "SELECT seconds_used FROM allowance_log WHERE rule_id=? AND date=?",
-        (rule_id, date)).fetchone()
-    return r["seconds_used"] if r else 0
-
-# --- Interventions ---
-def save_intervention(conn, kind, context, state):
-    cur = conn.execute(
-        "INSERT INTO interventions (kind,context,state,created_at,attempts) VALUES (?,?,?,?,0)",
-        (kind, json.dumps(context), json.dumps(state), time.time()))
-    conn.commit()
-    return cur.lastrowid
-
-def update_intervention(conn, iid, **fields):
-    if not fields:
-        return
-    if "state" in fields and not isinstance(fields["state"], str):
-        fields["state"] = json.dumps(fields["state"])
-    if "context" in fields and not isinstance(fields["context"], str):
-        fields["context"] = json.dumps(fields["context"])
-    cols = ",".join(f"{k}=?" for k in fields)
-    conn.execute(f"UPDATE interventions SET {cols} WHERE id=?", (*fields.values(), iid))
-    conn.commit()
-
-def get_intervention_by_id(conn, iid):
-    r = conn.execute("SELECT * FROM interventions WHERE id=?", (iid,)).fetchone()
-    if not r:
-        return None
-    d = dict(r)
-    d["context"] = json.loads(d["context"]) if d["context"] else {}
-    d["state"] = json.loads(d["state"]) if d["state"] else {}
-    return d

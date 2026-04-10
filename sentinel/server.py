@@ -3,6 +3,10 @@
 Two audiences:
 1. The macOS GUI app — the human user
 2. External AI agents (the user's personal Claude) — for analysis and automation
+
+Almost every "feature" lives in triggers now. This file is transport + a few
+critical primitives the agent can't build itself (OS-level blocking, monitor,
+LLM calls, store).
 """
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,10 +14,10 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing import Optional, Any
 from . import (
-    db, classifier, monitor, blocker, skiplist, scheduler, interventions,
-    persistence, stats as stats_mod, query as query_mod, ai_store,
-    chat_history, screenshots, search as search_mod, privacy as privacy_mod,
-    audit as audit_mod, backup as backup_mod, cache, ui, triggers as triggers_mod,
+    db, classifier, monitor, blocker, skiplist, persistence,
+    stats as stats_mod, query as query_mod, ai_store, screenshots,
+    privacy as privacy_mod, backup as backup_mod, ui,
+    triggers as triggers_mod,
 )
 
 app = FastAPI(title="Sentinel")
@@ -92,7 +96,6 @@ async def create_rule(body: RuleCreate):
         except Exception:
             parsed = {}
     rule_id = db.add_rule(c, body.text, parsed)
-    audit_mod.log_action(c, "rule.create", {"id": rule_id, "text": body.text})
     return {"id": rule_id, "text": body.text, "parsed": parsed}
 
 
@@ -104,7 +107,6 @@ def list_rules():
 @app.delete("/rules/{rule_id}")
 def remove_rule(rule_id: int):
     db.delete_rule(get_conn(), rule_id)
-    audit_mod.log_action(get_conn(), "rule.delete", {"id": rule_id})
     return {"ok": True}
 
 
@@ -173,7 +175,7 @@ def get_activities(limit: int = 100, since: Optional[float] = None):
     return db.get_activities(get_conn(), since=since, limit=limit)
 
 
-# --- Stats ---
+# --- Stats (views over the activity log) ---
 @app.get("/stats")
 def stats():
     c = get_conn()
@@ -184,31 +186,10 @@ def stats():
     }
 
 
-@app.get("/stats/score")
-def stats_score():
-    return {"score": stats_mod.calculate_score(get_conn())}
-
-
-@app.get("/stats/week")
-def stats_week():
-    return stats_mod.get_week_summary(get_conn())
-
-
-@app.get("/stats/month")
-def stats_month():
-    return stats_mod.get_month_summary(get_conn())
-
-
-@app.get("/stats/top-distractions")
-def stats_top(days: int = 7, limit: int = 10):
-    return stats_mod.get_top_distractions(get_conn(), days=days, limit=limit)
-
-
 # --- Blocking control ---
 @app.post("/block/{domain}")
 def manual_block(domain: str):
     blocker.block_domain(domain)
-    audit_mod.log_action(get_conn(), "block.manual", {"domain": domain})
     return {"ok": True}
 
 
@@ -223,47 +204,18 @@ def blocked_list():
     return blocker.get_blocked()
 
 
-# --- Pomodoro / Focus ---
-class PomodoroStart(BaseModel):
-    work_minutes: int = 25
-    break_minutes: int = 5
-    cycles: int = 4
+# --- Vision primitive (agent calls this from triggers) ---
+class VisionSnap(BaseModel):
+    user_context: str = ""
 
 
-@app.post("/pomodoro/start")
-def pomodoro_start(body: PomodoroStart):
-    return scheduler.start_pomodoro(get_conn(), body.work_minutes, body.break_minutes, body.cycles)
-
-
-@app.get("/pomodoro")
-def pomodoro_state():
-    return scheduler.get_pomodoro_state(get_conn()) or {}
-
-
-@app.delete("/pomodoro")
-def pomodoro_stop():
-    scheduler.stop_pomodoro(get_conn())
-    return {"ok": True}
-
-
-class FocusStart(BaseModel):
-    duration_minutes: int = 60
-    locked: bool = True
-
-
-@app.post("/focus/start")
-def focus_start(body: FocusStart):
-    return scheduler.start_focus_session(get_conn(), body.duration_minutes, body.locked)
-
-
-@app.get("/focus")
-def focus_status():
-    return scheduler.get_focus_session(get_conn()) or {}
-
-
-@app.delete("/focus/{session_id}")
-def focus_end(session_id: int, force: bool = False):
-    return {"ok": scheduler.end_focus_session(get_conn(), session_id, force=force)}
+@app.post("/vision/snapshot")
+async def vision_snapshot(body: VisionSnap):
+    c = get_conn()
+    api_key = db.get_config(c, "gemini_api_key")
+    if not api_key:
+        raise HTTPException(400, "API key not set")
+    return await screenshots.capture_and_analyze(api_key, body.user_context)
 
 
 # --- AI Q&A ---
@@ -277,11 +229,10 @@ async def ask(body: AskBody):
     api_key = db.get_config(c, "gemini_api_key")
     if not api_key:
         raise HTTPException(400, "API key not set")
-    answer = await query_mod.ask(c, body.question, api_key)
-    return {"answer": answer}
+    return {"answer": await query_mod.ask(c, body.question, api_key)}
 
 
-# --- AI Store: KV ---
+# --- AI Store ---
 class KVSet(BaseModel):
     namespace: str
     key: str
@@ -316,7 +267,6 @@ def ai_namespaces():
     return {"kv": ai_store.kv_namespaces(c), "docs": ai_store.doc_namespaces(c)}
 
 
-# --- AI Store: Docs ---
 class DocAdd(BaseModel):
     namespace: str
     doc: Any
@@ -357,70 +307,20 @@ def ai_summary():
     return ai_store.summary(get_conn())
 
 
-# --- Chat history ---
-class ChatCreate(BaseModel):
-    title: str = "New chat"
-
-
-class ChatMessage(BaseModel):
-    session_id: int
-    role: str
-    content: str
-
-
-@app.post("/chat/sessions")
-def chat_create(body: ChatCreate):
-    return {"id": chat_history.create_session(get_conn(), body.title)}
-
-
-@app.get("/chat/sessions")
-def chat_list():
-    return chat_history.list_sessions(get_conn())
-
-
-@app.get("/chat/sessions/{sid}")
-def chat_get(sid: int):
-    return chat_history.get_session(get_conn(), sid) or {}
-
-
-@app.delete("/chat/sessions/{sid}")
-def chat_delete(sid: int):
-    chat_history.delete_session(get_conn(), sid)
-    return {"ok": True}
-
-
-@app.post("/chat/messages")
-def chat_msg(body: ChatMessage):
-    return {"id": chat_history.add_message(get_conn(), body.session_id, body.role, body.content)}
-
-
-# --- Search ---
-@app.get("/search")
-def search(q: str):
-    return search_mod.search_all(get_conn(), q)
-
-
-# --- Privacy ---
+# --- Privacy (one config key, gated on the hot path) ---
 class PrivacyLevel(BaseModel):
     level: str
 
 
 @app.get("/privacy")
 def privacy_get():
-    c = get_conn()
-    return {"level": privacy_mod.get_privacy_level(c), "config": privacy_mod.get_privacy_config(c)}
+    return {"level": privacy_mod.get_level(get_conn())}
 
 
 @app.post("/privacy")
 def privacy_set(body: PrivacyLevel):
-    privacy_mod.set_privacy_level(get_conn(), body.level)
+    privacy_mod.set_level(get_conn(), body.level)
     return {"ok": True}
-
-
-# --- Audit ---
-@app.get("/audit")
-def audit_log(limit: int = 100):
-    return audit_mod.get_audit_log(get_conn(), limit)
 
 
 # --- Backup ---
@@ -454,8 +354,6 @@ def triggers_create(body: TriggerCreate):
         tid = triggers_mod.create(get_conn(), body.name, body.recipe,
                                   interval_sec=body.interval_sec,
                                   description=body.description)
-        audit_mod.log_action(get_conn(), "trigger.create",
-                             {"name": body.name, "id": tid})
         return {"id": tid, "name": body.name}
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -468,7 +366,6 @@ def triggers_list():
 
 @app.get("/triggers/calls")
 def triggers_calls():
-    """The operations triggers can call. Used by the LLM author too."""
     return triggers_mod.list_calls()
 
 
@@ -483,7 +380,6 @@ def triggers_get(name: str):
 @app.delete("/triggers/{name}")
 def triggers_delete(name: str):
     triggers_mod.delete(get_conn(), name)
-    audit_mod.log_action(get_conn(), "trigger.delete", {"name": name})
     return {"ok": True}
 
 
@@ -492,8 +388,9 @@ def triggers_toggle(name: str):
     t = triggers_mod.get(get_conn(), name)
     if not t:
         raise HTTPException(404, "not found")
-    triggers_mod.set_enabled(get_conn(), name, not bool(t.get("enabled")))
-    return {"ok": True, "enabled": not bool(t.get("enabled"))}
+    new = not bool(t.get("enabled"))
+    triggers_mod.set_enabled(get_conn(), name, new)
+    return {"ok": True, "enabled": new}
 
 
 @app.post("/triggers/{name}/run")
@@ -513,11 +410,10 @@ def triggers_health(name: str):
 
 @app.post("/triggers/author")
 async def triggers_author(body: TriggerAuthor):
-    """Plain English → trigger recipe via internal Gemini agent.
+    """Plain English → trigger recipe via the internal Gemini agent.
 
-    By default, also test-runs the recipe and asks the LLM to revise on
-    failure (up to body.max_revisions times). Set test=false to skip the
-    feedback loop and just author + store.
+    By default, test-runs the recipe and revises on failure (up to
+    body.max_revisions times). Set test=false to skip the feedback loop.
     """
     import httpx
     c = get_conn()
@@ -528,11 +424,6 @@ async def triggers_author(body: TriggerAuthor):
         if body.test:
             result = await triggers_mod.author_and_test(
                 c, api_key, body.request, max_revisions=body.max_revisions)
-            audit_mod.log_action(c, "trigger.author_and_test", {
-                "request": body.request, "ok": result["ok"],
-                "attempts": result["attempts"],
-                "name": (result.get("spec") or {}).get("name"),
-            })
             if not result["ok"]:
                 raise HTTPException(422, {
                     "message": "trigger failed test-run after revisions",
@@ -546,8 +437,6 @@ async def triggers_author(body: TriggerAuthor):
             tid = triggers_mod.create(c, spec["name"], spec["recipe"],
                                       interval_sec=int(spec.get("interval_sec", 300)),
                                       description=spec.get("description", ""))
-            audit_mod.log_action(c, "trigger.author",
-                                 {"name": spec["name"], "request": body.request})
             return {"ok": True, "id": tid, "spec": spec}
     except ValueError as e:
         raise HTTPException(400, f"author failed: {e}")

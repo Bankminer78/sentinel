@@ -5,7 +5,7 @@ A lean, AI-native accountability app for macOS.
 You interact through a native macOS GUI. Your external AI agents (your personal Claude, etc.) interact through a local REST API. The app keeps a small, sharp core of features that can't be done by an AI; everything else is a generic store the AI can use freely.
 
 ```
-22 Python modules · 574 tests · 3,496 LoC · native macOS app
+17 Python modules · 413 tests · 2,790 LoC · native macOS app
 ```
 
 ## What it does
@@ -108,39 +108,61 @@ docs = httpx.get(f"{SENTINEL}/ai/docs?namespace=habits").json()
 |   - Activity monitor       |
 |   - /etc/hosts blocking    |
 |   - AI K/V + doc store     |
-|   - Chat memory            |
+|   - AI-authored triggers   |
 |   - Q&A                    |
 |                            |
 |   SQLite (~/.config/...)   |
 +----------------------------+
 ```
 
-21 Python modules, all self-contained, all functional style:
+16 Python modules, grouped by the abstraction they fill:
 
+**The box** (storage + persistence + backup):
 | Module | Purpose |
 |---|---|
-| `db` | SQLite connection + core tables |
-| `blocker` | Block domains via `/etc/hosts`, kill apps |
-| `skiplist` | 60+ utility domains never classified |
-| `monitor` | macOS foreground app + browser URL polling |
-| `classifier` | Gemini Flash classification + NL rule parsing |
-| `scheduler` | Pomodoro + focus sessions (the only "productivity" features) |
-| `interventions` | 5-second countdown overlay + friction types |
+| `db` | SQLite — only 4 tables: rules, activity_log, seen_domains, config |
 | `persistence` | LaunchDaemon tamper detection |
-| `stats` | Productivity score + breakdown + top distractions |
-| `query` | Natural-language Q&A over user data |
-| `ai_store` | **Generic K/V + document store for AI agents** |
-| `triggers` | **AI-authored features**: scheduled recipes (DSL) the internal Gemini writes from English |
-| `chat_history` | Persistent AI chat sessions |
-| `screenshots` | Optional vision-LLM snapshot analysis |
-| `search` | Full-text search across all data |
-| `privacy` | 3 privacy levels + PII redaction + wipe |
-| `audit` | Tamper-evident hash-chain audit log |
-| `backup` | SQLite snapshot backup/restore |
-| `cache` | TTL cache helper |
-| `ui` | Single-file HTML/CSS/JS dashboard |
+| `backup` | SQLite native `.backup` snapshots |
+
+**Sensors** (what the system can see):
+| Module | Purpose |
+|---|---|
+| `monitor` | macOS foreground app + browser URL polling |
+| `screenshots` | `screencapture` + Gemini vision analysis |
+
+**Effectors** (what the system can do):
+| Module | Purpose |
+|---|---|
+| `blocker` | `/etc/hosts` block + app kill via osascript |
+| `skiplist` | Static set of domains never classified (hot path) |
+
+**LLM** (text + vision Gemini calls):
+| Module | Purpose |
+|---|---|
+| `classifier` | Domain classification, rule parsing, rule evaluation |
+
+**Composition** (where the agent lives):
+| Module | Purpose |
+|---|---|
+| `ai_store` | **Generic K/V + document store** — namespaced, the agent's scratchpad |
+| `triggers` | **AI-authored features** — DSL recipes the internal Gemini writes from English, runs on a schedule, with run history + revise-on-failure feedback |
+
+**Views & utilities**:
+| Module | Purpose |
+|---|---|
+| `stats` | Score, breakdown, top distractions (one parameterized range function) |
+| `query` | `/ask` — give Gemini activity + rules + question |
+| `scheduler` | Time-window primitive (`is_schedule_active`) for rule activation |
+| `privacy` | One config key: `minimal | balanced | full` |
+
+**Transport**:
+| Module | Purpose |
+|---|---|
 | `server` | FastAPI — the only thing GUI/agents talk to |
+| `ui` | Single-file HTML/CSS/JS dashboard |
 | `cli` | `sentinel serve` (used by the macOS app) |
+
+Pomodoro, focus sessions, chat history, full-text search, audit log, intervention countdowns, goals, streaks, allowances, PII redaction, TTL cache — all gone. Anything an AI agent can compose from the primitives above plus a trigger recipe is no longer in this codebase.
 
 ## Tests
 
