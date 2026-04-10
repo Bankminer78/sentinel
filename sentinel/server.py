@@ -18,6 +18,8 @@ from . import (
     stats as stats_mod, query as query_mod, ai_store, screenshots,
     privacy as privacy_mod, backup as backup_mod, ui,
     triggers as triggers_mod, locks as locks_mod,
+    imessage as imessage_mod, notify as notify_mod,
+    screen as screen_mod, emergency as emergency_mod,
 )
 
 app = FastAPI(title="Sentinel")
@@ -412,6 +414,98 @@ def triggers_runs(name: str, limit: int = 10):
 @app.get("/triggers/{name}/health")
 def triggers_health(name: str):
     return triggers_mod.health(get_conn(), name)
+
+
+# --- iMessage sensor ---
+@app.get("/imessage/access")
+def imessage_access():
+    return imessage_mod.access_status()
+
+
+@app.get("/imessage/current")
+def imessage_current():
+    return imessage_mod.current_chat()
+
+
+@app.get("/imessage/recent-chats")
+def imessage_recent_chats(limit: int = 10):
+    return imessage_mod.recent_chats(limit=limit)
+
+
+@app.get("/imessage/recent-messages")
+def imessage_recent_messages(handle: str, limit: int = 20):
+    return imessage_mod.recent_messages(handle, limit=limit)
+
+
+# --- Notify / dialog effectors ---
+class NotifyBody(BaseModel):
+    title: str = "Sentinel"
+    body: str = ""
+    subtitle: str = ""
+
+
+class DialogBody(BaseModel):
+    title: str = "Sentinel"
+    body: str = ""
+    buttons: list = ["OK"]
+    default_button: Optional[str] = None
+    timeout_seconds: Optional[int] = None
+
+
+@app.post("/notify")
+def post_notify(body: NotifyBody):
+    return notify_mod.notify(body.title, body.body, body.subtitle)
+
+
+@app.post("/dialog")
+def post_dialog(body: DialogBody):
+    return notify_mod.dialog(body.title, body.body, body.buttons,
+                             body.default_button, body.timeout_seconds)
+
+
+# --- Frozen Turkey: screen lockout ---
+class ScreenLockBody(BaseModel):
+    duration_seconds: int
+    message: str = "Focus mode"
+
+
+@app.post("/screen-lock")
+def post_screen_lock(body: ScreenLockBody):
+    try:
+        return screen_mod.lock(get_conn(), body.duration_seconds, body.message)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/screen-lock/state")
+def get_screen_lock_state():
+    """Polled by the macOS app every second to know whether to take over."""
+    return screen_mod.get_state(get_conn())
+
+
+# --- Emergency exit ---
+class EmergencyExitBody(BaseModel):
+    reason: str
+    kinds: Optional[list] = None
+
+
+@app.get("/emergency-exit/status")
+def emergency_status():
+    return emergency_mod.status(get_conn())
+
+
+@app.get("/emergency-exit/history")
+def emergency_history(limit: int = 20):
+    return emergency_mod.history(get_conn(), limit=limit)
+
+
+@app.post("/emergency-exit")
+def emergency_exit(body: EmergencyExitBody):
+    result = emergency_mod.trigger(get_conn(), body.reason, body.kinds)
+    if not result.get("ok"):
+        raise HTTPException(429 if "remaining" in result.get("error", "")
+                            else 400, result.get("error"))
+    return result
 
 
 # --- Locks (commitments + friction-gated early release) ---

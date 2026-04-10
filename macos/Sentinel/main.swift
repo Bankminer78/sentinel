@@ -100,12 +100,159 @@ final class DaemonManager {
     }
 }
 
+// MARK: - LockoutManager (Frozen Turkey)
+
+/// Polls /screen-lock/state every second. When active, takes over every
+/// connected screen with a borderless full-screen window that the user
+/// cannot dismiss. The only way out is the emergency-exit endpoint, which
+/// the lockout window deliberately doesn't expose.
+final class LockoutManager {
+    private var windows: [NSWindow] = []
+    private var labels: [NSTextField] = []
+    private var timer: Timer?
+    private var pollTimer: Timer?
+    private var endTime: Date?
+    private var message: String = ""
+
+    func start() {
+        // Poll the daemon every second for state
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.poll()
+        }
+    }
+
+    private func poll() {
+        guard let url = URL(string: "\(SERVER_URL)/screen-lock/state") else { return }
+        let req = URLRequest(url: url, timeoutInterval: 1)
+        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+            guard let self = self,
+                  let data = data,
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { return }
+            let active = obj["active"] as? Bool ?? false
+            let untilTs = obj["until_ts"] as? Double
+            let msg = (obj["message"] as? String) ?? "Focus mode"
+            DispatchQueue.main.async {
+                if active, let ts = untilTs {
+                    self.showLockout(until: Date(timeIntervalSince1970: ts), message: msg)
+                } else {
+                    self.hideLockout()
+                }
+            }
+        }.resume()
+    }
+
+    private func showLockout(until: Date, message: String) {
+        // Already showing? Just update the end time / message.
+        if !windows.isEmpty {
+            self.endTime = until
+            self.message = message
+            return
+        }
+        debugLog("LockoutManager.showLockout until=\(until) msg=\(message)")
+        self.endTime = until
+        self.message = message
+        for screen in NSScreen.screens {
+            let w = NSWindow(
+                contentRect: screen.frame,
+                styleMask: [.borderless],
+                backing: .buffered, defer: false
+            )
+            w.level = .screenSaver
+            w.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
+            w.backgroundColor = NSColor.black.withAlphaComponent(0.97)
+            w.isOpaque = false
+            w.ignoresMouseEvents = false
+            w.hasShadow = false
+
+            let titleLabel = NSTextField(labelWithString: message)
+            titleLabel.font = NSFont.systemFont(ofSize: 56, weight: .bold)
+            titleLabel.textColor = .white
+            titleLabel.alignment = .center
+            titleLabel.backgroundColor = .clear
+            titleLabel.isBordered = false
+            titleLabel.frame = NSRect(
+                x: 0, y: screen.frame.height / 2,
+                width: screen.frame.width, height: 80
+            )
+            titleLabel.autoresizingMask = [.minXMargin, .maxXMargin, .minYMargin, .maxYMargin]
+
+            let timerLabel = NSTextField(labelWithString: "")
+            timerLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 96, weight: .light)
+            timerLabel.textColor = .white
+            timerLabel.alignment = .center
+            timerLabel.backgroundColor = .clear
+            timerLabel.isBordered = false
+            timerLabel.frame = NSRect(
+                x: 0, y: screen.frame.height / 2 - 140,
+                width: screen.frame.width, height: 110
+            )
+            timerLabel.autoresizingMask = [.minXMargin, .maxXMargin, .minYMargin, .maxYMargin]
+
+            let hint = NSTextField(labelWithString: "Frozen until the timer ends. Use emergency exit if this is real.")
+            hint.font = NSFont.systemFont(ofSize: 14)
+            hint.textColor = NSColor.white.withAlphaComponent(0.4)
+            hint.alignment = .center
+            hint.backgroundColor = .clear
+            hint.isBordered = false
+            hint.frame = NSRect(
+                x: 0, y: screen.frame.height / 2 - 200,
+                width: screen.frame.width, height: 30
+            )
+            hint.autoresizingMask = [.minXMargin, .maxXMargin, .minYMargin, .maxYMargin]
+
+            w.contentView?.addSubview(titleLabel)
+            w.contentView?.addSubview(timerLabel)
+            w.contentView?.addSubview(hint)
+            w.makeKeyAndOrderFront(nil)
+
+            windows.append(w)
+            labels.append(timerLabel)
+        }
+        // Drive the countdown labels at 1Hz
+        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.tick()
+        }
+        tick()
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func tick() {
+        guard let end = endTime else { return }
+        let remaining = max(0, end.timeIntervalSinceNow)
+        let mins = Int(remaining) / 60
+        let secs = Int(remaining) % 60
+        let text = String(format: "%02d:%02d", mins, secs)
+        for label in labels {
+            label.stringValue = text
+        }
+        if remaining <= 0 {
+            hideLockout()
+        }
+    }
+
+    private func hideLockout() {
+        if windows.isEmpty { return }
+        debugLog("LockoutManager.hideLockout")
+        timer?.invalidate()
+        timer = nil
+        for w in windows {
+            w.orderOut(nil)
+        }
+        windows.removeAll()
+        labels.removeAll()
+        endTime = nil
+    }
+}
+
+
 // MARK: - AppDelegate
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
     var window: NSWindow?
     let daemon = DaemonManager()
+    let lockout = LockoutManager()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Don't show in dock — menu bar app
@@ -132,7 +279,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Wait briefly then open the window once
         DispatchQueue.global(qos: .userInitiated).async {
             _ = self.daemon.waitForReady(timeout: 8)
-            DispatchQueue.main.async { self.openWindow() }
+            DispatchQueue.main.async {
+                self.openWindow()
+                self.lockout.start()
+            }
         }
     }
 

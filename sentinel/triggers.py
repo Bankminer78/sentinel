@@ -38,7 +38,8 @@ from typing import Any, Callable
 
 from . import (
     db as db_mod, ai_store, blocker, monitor, stats as stats_mod,
-    screenshots, locks as locks_mod,
+    screenshots, locks as locks_mod, notify as notify_mod,
+    imessage as imessage_mod, screen as screen_mod, emergency as emergency_mod,
 )
 
 # --- Schema ---
@@ -310,6 +311,62 @@ def _call_list_locks(conn, args, ctx):
     return locks_mod.list_active(conn, kind=args.get("kind"))
 
 
+# --- iMessage sensor ---
+
+def _call_imessage_current(conn, args, ctx):
+    return imessage_mod.current_chat()
+
+
+def _call_imessage_recent_chats(conn, args, ctx):
+    return imessage_mod.recent_chats(limit=int(args.get("limit", 10)))
+
+
+def _call_imessage_recent_messages(conn, args, ctx):
+    return imessage_mod.recent_messages(
+        args.get("handle", ""), limit=int(args.get("limit", 20)))
+
+
+# --- Notify / dialog effectors ---
+
+def _call_notify(conn, args, ctx):
+    return notify_mod.notify(
+        args.get("title", "Sentinel"),
+        args.get("body", ""),
+        args.get("subtitle", ""))
+
+
+def _call_dialog(conn, args, ctx):
+    return notify_mod.dialog(
+        args.get("title", "Sentinel"),
+        args.get("body", ""),
+        buttons=args.get("buttons") or ["OK"],
+        default_button=args.get("default_button"),
+        timeout_seconds=args.get("timeout_seconds"))
+
+
+# --- Screen lockout (Frozen Turkey) ---
+
+def _call_lock_screen(conn, args, ctx):
+    duration = args.get("duration_seconds")
+    if not duration:
+        return {"ok": False, "reason": "duration_seconds required"}
+    try:
+        s = screen_mod.lock(conn, int(duration), args.get("message", "Focus mode"))
+        return {"ok": True, **s}
+    except ValueError as e:
+        return {"ok": False, "reason": str(e)}
+
+
+def _call_is_screen_locked(conn, args, ctx):
+    return screen_mod.get_state(conn)
+
+
+# --- Emergency exit (read-only from triggers — agent can check, not spend) ---
+
+def _call_emergency_remaining(conn, args, ctx):
+    return emergency_mod.status(conn)
+
+
 def _call_get_score(conn, args, ctx):
     return {"score": stats_mod.calculate_score(conn)}
 
@@ -382,6 +439,14 @@ CALLS: dict[str, Callable] = {
     "create_lock": _call_create_lock,
     "is_locked": _call_is_locked,
     "list_locks": _call_list_locks,
+    "imessage_current": _call_imessage_current,
+    "imessage_recent_chats": _call_imessage_recent_chats,
+    "imessage_recent_messages": _call_imessage_recent_messages,
+    "notify": _call_notify,
+    "dialog": _call_dialog,
+    "lock_screen": _call_lock_screen,
+    "is_screen_locked": _call_is_screen_locked,
+    "emergency_remaining": _call_emergency_remaining,
 }
 
 
@@ -412,6 +477,38 @@ def list_calls() -> dict:
         ),
         "is_locked": "args:{kind,target?} → {locked:bool}  // is any active lock matching this?",
         "list_locks": "args:{kind?} → [lock,...]  // active locks, optionally filtered by kind",
+        "imessage_current": (
+            "args:{} → {handle,service,is_group,last_message_ts,last_text} | {error}"
+            "  // most recently active iMessage chat"
+        ),
+        "imessage_recent_chats": (
+            "args:{limit?} → [{handle,service,is_group,last_message_ts,last_text},...]"
+            "  // recent chat threads, newest first"
+        ),
+        "imessage_recent_messages": (
+            "args:{handle,limit?} → [{ts,from_me,text},...]"
+            "  // recent messages with a specific handle"
+        ),
+        "notify": (
+            "args:{title,body,subtitle?} → {ok}"
+            "  // macOS banner notification, non-blocking"
+        ),
+        "dialog": (
+            "args:{title,body,buttons?,default_button?,timeout_seconds?} → {ok,button}"
+            "  // modal popup, BLOCKS until clicked. Use for friction prompts"
+        ),
+        "lock_screen": (
+            "args:{duration_seconds,message?} → {ok,active,until_ts,remaining_seconds}"
+            "  // Frozen Turkey: full-screen lockout for the duration."
+            " Cannot be ended early except by user emergency-exit"
+        ),
+        "is_screen_locked": (
+            "args:{} → {active,until_ts,message,remaining_seconds}"
+        ),
+        "emergency_remaining": (
+            "args:{} → {limit,used_this_month,remaining,month_start_ts}"
+            "  // read-only — agent CANNOT trigger an exit, only the user can"
+        ),
     }
 
 
