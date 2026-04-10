@@ -69,7 +69,24 @@ from urllib.parse import urlparse
 
 import httpx
 
-from . import sandbox, audit
+from . import sandbox, audit, db as db_mod
+
+
+# --- Auth providers (config-resident secrets, never in templates) ---
+#
+# A recipe can request authentication for an http_fetch via auth="<provider>"
+# without ever seeing the secret. The primitive reads the configured key at
+# execute time, adds the right header, and forgets it. The locals dict, audit
+# log, and run history never contain the value.
+
+AUTH_PROVIDERS = {
+    "gemini": {"header": "x-goog-api-key", "config_key": "gemini_api_key",
+               "prefix": ""},
+    "anthropic": {"header": "x-api-key", "config_key": "anthropic_api_key",
+                  "prefix": ""},
+    "openai": {"header": "Authorization", "config_key": "openai_api_key",
+               "prefix": "Bearer "},
+}
 
 
 # --- Daemon self-port discovery (set by server.py at startup) ---
@@ -93,8 +110,15 @@ def is_daemon_port(port: int) -> bool:
 
 def http_fetch(conn, method: str, url: str, headers: dict | None = None,
                body: Any = None, timeout: float = sandbox.DEFAULT_HTTP_TIMEOUT,
+               auth: str | None = None,
                actor: str = "trigger") -> dict:
     """Make an HTTP request to an allowlisted host with hardened defenses.
+
+    auth: optional provider name from AUTH_PROVIDERS. If set, the matching
+    config key is read at execute time and the appropriate header added.
+    The secret value never appears in args, locals, audit, or run history.
+    Reason code ``auth_unknown`` if the provider is unknown,
+    ``auth_no_key`` if the config key isn't set.
 
     Returns:
         {"ok": True, "status": int, "headers": {...}, "body_text": str, "json"?: Any}
@@ -104,7 +128,7 @@ def http_fetch(conn, method: str, url: str, headers: dict | None = None,
     so they MUST be a fixed enum and never include payload data):
         invalid_method, bad_url, host_not_allowed, ssrf_blocked,
         daemon_self_call, dns_failed, timeout, http_error, body_too_large,
-        too_many_redirects, response_decode_failed
+        too_many_redirects, response_decode_failed, auth_unknown, auth_no_key
     """
     method = (method or "GET").upper()
     if method not in sandbox.HTTP_METHODS:
@@ -141,6 +165,16 @@ def http_fetch(conn, method: str, url: str, headers: dict | None = None,
     timeout_f = max(1.0, min(timeout_f, sandbox.MAX_HTTP_TIMEOUT))
     # Sanitize headers
     safe_headers = _sanitize_headers(headers)
+    # Resolve auth provider into a header (secret never enters templates)
+    if auth:
+        provider = AUTH_PROVIDERS.get(auth)
+        if not provider:
+            return _http_error("auth_unknown", actor=actor, args={"auth": auth})
+        secret = db_mod.get_config(conn, provider["config_key"])
+        if not secret:
+            return _http_error("auth_no_key", actor=actor,
+                               args={"auth": auth, "config_key": provider["config_key"]})
+        safe_headers[provider["header"]] = provider["prefix"] + secret
     # Encode body
     body_bytes = _encode_body(body)
     # Make the request — pin the IP via the URL substitution

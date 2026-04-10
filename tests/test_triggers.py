@@ -326,12 +326,29 @@ def test_run_once_get_status(conn):
     assert "blocked" in out["locals"]["s"]
 
 
-def test_vision_check_no_api_key(conn):
+def test_vision_check_macro_expanded(conn):
+    """vision_check is now a macro — the stored recipe contains the
+    expanded sub-recipe (screen_capture + http_fetch + jsonpath), not the
+    original one-liner. Without an api key, the http_fetch step fails
+    with auth_no_key and the run is marked failed."""
+    from unittest.mock import patch, MagicMock
     triggers.create(conn, "vis", {"steps": [
         {"call": "vision_check", "args": {"user_context": "work"}, "save_as": "v"},
     ]}, interval_sec=60)
-    out = triggers.run_once(conn, "vis")
-    assert out["locals"]["v"]["verdict"] == "neutral"
+    # Stored recipe has the expanded form
+    stored = triggers.get(conn, "vis")
+    call_names = [s.get("call") for s in stored["recipe"]["steps"] if s.get("call")]
+    assert "screen_capture" in call_names
+    assert "http_fetch" in call_names
+    assert "jsonpath" in call_names
+    assert "vision_check" not in call_names
+    # Without an api key, http_fetch returns auth_no_key
+    with patch("subprocess.run", return_value=MagicMock(returncode=0)):
+        out = triggers.run_once(conn, "vis")
+    assert out["status"] == "error"
+    # The failure is on the http_fetch step, not the screen_capture or jsonpath
+    fetch_step = next(s for s in out["steps"] if s.get("call") == "http_fetch")
+    assert fetch_step["status"] == "error"
 
 
 # --- Due triggers ---

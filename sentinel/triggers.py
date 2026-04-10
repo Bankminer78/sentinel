@@ -80,7 +80,13 @@ RUN_HISTORY_KEEP = 20  # rows per trigger
 # --- CRUD ---
 
 def create(conn, name: str, recipe: dict, interval_sec: int = 300, description: str = "") -> int:
-    """Create or replace a trigger by name."""
+    """Create or replace a trigger by name.
+
+    Macros are expanded BEFORE validation, so the recipe stored in the
+    table contains only primitive CALLs. The user-facing form (with the
+    macros) is the input; the stored form (with the expanded sub-recipes)
+    is what the user sees in GET /triggers/{name} — review-able.
+    """
     _ensure_table(conn)
     if not name or not isinstance(name, str):
         raise ValueError("name required")
@@ -88,13 +94,17 @@ def create(conn, name: str, recipe: dict, interval_sec: int = 300, description: 
         raise ValueError("interval_sec must be >= 5")
     if not isinstance(recipe, dict) or "steps" not in recipe:
         raise ValueError("recipe must be {steps: [...]}")
-    validate_recipe(recipe)
+    # Expand macros into their canonical primitive sub-recipes. Validation
+    # then sees only known CALLs.
+    from . import macros as macros_mod
+    expanded = macros_mod.expand_recipe(conn, recipe)
+    validate_recipe(expanded)
     cur = conn.execute(
         "INSERT INTO agent_triggers (name, description, interval_sec, recipe, created_at) "
         "VALUES (?, ?, ?, ?, ?) "
         "ON CONFLICT(name) DO UPDATE SET description=excluded.description, "
         "interval_sec=excluded.interval_sec, recipe=excluded.recipe",
-        (name, description, interval_sec, json.dumps(recipe), time.time()))
+        (name, description, interval_sec, json.dumps(expanded), time.time()))
     conn.commit()
     return cur.lastrowid or get(conn, name)["id"]
 
@@ -410,6 +420,7 @@ def _call_http_fetch(conn, args, ctx):
         headers=args.get("headers"),
         body=args.get("body"),
         timeout=args.get("timeout", 30),
+        auth=args.get("auth"),
         actor=f"trigger:{ctx.get('name', '?')}",
     )
 
@@ -534,8 +545,15 @@ CALLS: dict[str, Callable] = {
 }
 
 
-def list_calls() -> dict:
-    """For the LLM author: what calls exist, what they take, what they return."""
+def list_calls(include_macros: bool = True) -> dict:
+    """For the LLM author: what calls exist, what they take, what they return.
+
+    By default this includes both real CALLS (the primitives the runtime
+    invokes directly) and macros (one-line shortcuts that desugar to a
+    canonical primitive sub-recipe at validation time). The author should
+    prefer the macro version when one exists — it's a one-liner and the
+    expansion is reviewable in GET /triggers/{name}.
+    """
     return {
         "vision_check": "args:{user_context} → {verdict:'productive'|'distracted'|'neutral', details:str}",
         "get_status": "args:{} → {current:{app,title,domain,url}, blocked:{domains:[...]}, rules_count:int}",
