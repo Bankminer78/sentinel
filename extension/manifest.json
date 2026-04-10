@@ -1,10 +1,14 @@
 {
   "manifest_version": 3,
-  "name": "Sentinel",
-  "version": "0.1.0",
-  "description": "Sentinel browser monitor — reports page visits and enforces blocks.",
+  "name": "Sentinel Activity Reporter",
+  "version": "0.2.0",
+  "description": "Reports page visits to the local Sentinel daemon for activity logging, classification, and rule enforcement. Works in Chrome, Arc, Brave, and other Chromium browsers.",
   "permissions": ["activeTab", "storage", "tabs"],
-  "host_permissions": ["<all_urls>", "http://localhost:9849/*"],
+  "host_permissions": [
+    "<all_urls>",
+    "http://localhost:9849/*",
+    "http://127.0.0.1:9849/*"
+  ],
   "background": {
     "service_worker": "background.js"
   },

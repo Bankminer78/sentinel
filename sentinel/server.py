@@ -143,39 +143,72 @@ class ActivityReport(BaseModel):
 
 @app.post("/activity")
 async def report_activity(body: ActivityReport):
+    """Receive a page visit from the browser extension.
+
+    Logs EVERY non-skiplisted domain to activity_log so the dashboard
+    Activity tab + the agent's reasoning over usage actually have data.
+    Previously this only logged blocked visits, which is why the
+    activity_log was empty even with the extension installed.
+
+    The decision logic (classify, rule eval, /etc/hosts block) runs in
+    parallel — same as before — but is no longer the only path that
+    writes a row.
+    """
     c = get_conn()
     monitor.set_browser_url(body.url)
     if not body.domain:
         return {"verdict": "allow"}
     if skiplist.should_skip(body.domain):
         return {"verdict": "allow"}
+
+    # Determine the verdict + category for the response.
+    verdict = "allow"
+    category = None
+
     if blocker.is_blocked_domain(body.domain):
-        return {"verdict": "block"}
-    api_key = db.get_config(c, "gemini_api_key")
-    if not api_key:
-        return {"verdict": "allow"}
-    seen = db.get_seen(c, body.domain)
-    if seen in ("none", "approved"):
-        return {"verdict": "allow"}
-    if not seen:
-        category = await classifier.classify_domain(api_key, body.domain)
-        db.save_seen(c, body.domain, category)
-        if category in ("streaming", "social", "adult", "gaming"):
-            rules = db.get_rules(c)
-            if rules:
-                verdict = await classifier.evaluate_rules(api_key, "", body.domain, body.title, rules)
-                if verdict == "block":
-                    blocker.block_domain(body.domain)
-                    db.log_activity(c, "", body.title, body.url, body.domain, "block")
-                    return {"verdict": "block", "category": category}
-            return {"verdict": "warn", "category": category}
-        return {"verdict": "allow"}
-    if seen in ("streaming", "social", "adult", "gaming"):
-        rules = db.get_rules(c)
-        if rules:
-            verdict = await classifier.evaluate_rules(api_key, "", body.domain, body.title, rules)
-            return {"verdict": verdict, "category": seen}
-    return {"verdict": "allow"}
+        verdict = "block"
+    else:
+        api_key = db.get_config(c, "gemini_api_key")
+        if api_key:
+            seen = db.get_seen(c, body.domain)
+            if seen is None:
+                # First time we've seen this domain — classify once + cache.
+                # Wrap in try/except: a Gemini timeout / rate limit / network
+                # blip must not 500 the activity logger. We just degrade to
+                # "allow" + no category.
+                try:
+                    category = await classifier.classify_domain(api_key, body.domain)
+                    db.save_seen(c, body.domain, category)
+                except Exception:
+                    category = None
+            else:
+                category = seen
+            if category in ("streaming", "social", "adult", "gaming"):
+                rules = db.get_rules(c)
+                if rules:
+                    try:
+                        eval_verdict = await classifier.evaluate_rules(
+                            api_key, "", body.domain, body.title, rules)
+                    except Exception:
+                        eval_verdict = "allow"
+                    if eval_verdict == "block":
+                        blocker.block_domain(body.domain, conn=c, actor="rule_eval")
+                        verdict = "block"
+                    elif eval_verdict == "warn":
+                        verdict = "warn"
+                else:
+                    # Distracting category but no rules — warn so the user
+                    # at least notices the new domain in the dashboard.
+                    verdict = "warn"
+
+    # Log every non-skiplisted visit. The dashboard Activity tab reads
+    # from this table, and the agent reasons over it via stats.
+    db.log_activity(c, "", body.title, body.url, body.domain, verdict)
+
+    response = {"verdict": verdict}
+    if category:
+        response["category"] = category
+    return response
 
 
 @app.get("/status")

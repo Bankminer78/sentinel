@@ -110,7 +110,23 @@ def test_popup_html_references_popup_js():
 def test_background_posts_to_activity_endpoint():
     bg = (EXT_DIR / "background.js").read_text()
     assert "/activity" in bg
-    assert "localhost:9849" in bg
+    # Accept either localhost:9849 or 127.0.0.1:9849 — both resolve to the
+    # same daemon. The 0.2.0 release switched to 127.0.0.1 for consistency
+    # with the daemon's bind address.
+    assert "localhost:9849" in bg or "127.0.0.1:9849" in bg
+
+
+def test_background_sends_correct_activity_schema():
+    """The 0.1.0 extension sent {url, tab_id, ts}; the daemon expects
+    {url, title, domain}. Ensure the 0.2.0 fix is in place — the
+    background script must send the correct fields."""
+    bg = (EXT_DIR / "background.js").read_text()
+    # Must extract domain client-side
+    assert "extractDomain" in bg or "new URL" in bg
+    # Must include domain in the POST body
+    assert '"domain"' in bg or "domain," in bg or "domain:" in bg
+    # Must include title in the POST body
+    assert '"title"' in bg or "title," in bg or "title:" in bg
 
 
 def test_content_script_has_overlay_and_countdown():
