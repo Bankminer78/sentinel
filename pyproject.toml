@@ -20,3 +20,11 @@ build-backend = "setuptools.build_meta"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# E2E tests (headless browser + fresh daemon) run separately:
+#   pytest -m e2e -v
+# Regular tests (no external processes) run by default:
+#   pytest tests/
+addopts = "-m 'not e2e'"
+markers = [
+    "e2e: end-to-end dashboard tests via Playwright (start own daemon, need chromium)",
+]

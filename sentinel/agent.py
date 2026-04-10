@@ -285,11 +285,10 @@ async def run_session(prompt: str, session_id: str | None = None,
     yield {"type": "session_started", "session_id": sid}
 
     # Track which text blocks we've already streamed via StreamEvent so the
-    # final AssistantMessage doesn't double-emit the same text. We index by
-    # the (message, content_block_index) pair via a "currently streaming"
-    # marker that flips when message_start fires.
+    # final AssistantMessage doesn't double-emit the same text.
     streamed_text_indices: set[int] = set()
     current_message_streaming = False
+    session_completed = False  # set True when ResultMessage fires
 
     try:
         async for msg in query(prompt=prompt, options=options):
@@ -350,7 +349,7 @@ async def run_session(prompt: str, session_id: str | None = None,
                                "session_id": sid,
                                "result": content[:2000]}
             elif isinstance(msg, ResultMessage):
-                # Track real cost from the result message
+                session_completed = True
                 cost = getattr(msg, "total_cost_usd", None) or getattr(msg, "cost_usd", None) or 0
                 if cost:
                     add_usage_usd(conn, float(cost))
@@ -366,19 +365,28 @@ async def run_session(prompt: str, session_id: str | None = None,
                        "session_id": sid,
                        "info": str(msg)[:300]}
     except BaseException as e:
-        # BaseException catches ExceptionGroup (Python 3.11+ — extends
-        # BaseException, not Exception) which the SDK's internal TaskGroup
-        # can raise. Also catches KeyboardInterrupt, but that's fine here
-        # because we still want to yield the error event + write the audit
-        # entry before the generator closes.
-        audit.log(conn, actor, "agent.session_errored",
-                  {"exc_type": type(e).__name__,
-                   "exc_msg": str(e)[:300]},
-                  status="error")
-        yield {"type": "error",
-               "session_id": sid,
-               "error_type": type(e).__name__,
-               "message": str(e)[:300]}
+        if session_completed:
+            # The session already finished successfully (ResultMessage was
+            # yielded). This exception is SDK cleanup noise — typically an
+            # ExceptionGroup from the internal TaskGroup whose subprocess
+            # reader task is still pending when the generator closes. Log
+            # it for debugging but DON'T show it to the user — they already
+            # got their result and seeing a scary "ExceptionGroup" error
+            # after a successful session is confusing.
+            audit.log(conn, actor, "agent.session_cleanup",
+                      {"exc_type": type(e).__name__,
+                       "exc_msg": str(e)[:200]},
+                      status="suppressed")
+        else:
+            # Real error during an incomplete session — show it.
+            audit.log(conn, actor, "agent.session_errored",
+                      {"exc_type": type(e).__name__,
+                       "exc_msg": str(e)[:300]},
+                      status="error")
+            yield {"type": "error",
+                   "session_id": sid,
+                   "error_type": type(e).__name__,
+                   "message": str(e)[:300]}
 
 
 def _truncate(value: Any, max_len: int = 1000) -> Any:

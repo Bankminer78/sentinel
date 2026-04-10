@@ -777,19 +777,24 @@ async def agent_start(body: AgentRequest, authorization: Optional[str] = Header(
                     queue.put_nowait(event)
         except BaseException as e:
             # The SDK's internal TaskGroup can raise ExceptionGroup which
-            # extends BaseException (not Exception) and leaks past
-            # run_session's own handler when the exception fires during
-            # a generator yield boundary. Catch it here so the GUI gets
-            # a clean error event instead of a raw crash.
-            try:
-                queue.put_nowait({
-                    "type": "error",
-                    "session_id": sid,
-                    "error_type": type(e).__name__,
-                    "message": str(e)[:500],
-                })
-            except Exception:
-                pass
+            # extends BaseException and leaks past run_session's handler.
+            # If the session already completed (we saw a result event in
+            # the queue), this is cleanup noise — don't show it to the
+            # user. Only surface real errors from incomplete sessions.
+            has_result = any(
+                isinstance(item, dict) and item.get("type") == "result"
+                for item in list(queue._queue)  # peek without consuming
+            ) if hasattr(queue, '_queue') else False
+            if not has_result:
+                try:
+                    queue.put_nowait({
+                        "type": "error",
+                        "session_id": sid,
+                        "error_type": type(e).__name__,
+                        "message": str(e)[:500],
+                    })
+                except Exception:
+                    pass
         finally:
             try:
                 queue.put_nowait(_AGENT_SENTINEL)

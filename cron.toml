@@ -1,0 +1,4 @@
+[[policies]]
+name = "adult_domain_guard"
+file = "policies/adult_domain_guard.py"
+cron = "* * * * *"
