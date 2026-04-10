@@ -313,14 +313,18 @@ async function refreshTriggers() {
   list.innerHTML = ts.map(t => {
     const last = t.last_run ? new Date(t.last_run * 1000).toLocaleTimeString() : 'never';
     const stat = t.last_status === 'ok' ? '✓' : (t.last_status ? '!' : '·');
+    // JSON.stringify produces a fully-quoted JS string literal — bulletproof
+    // against names with apostrophes, double quotes, or anything else that
+    // would otherwise need manual escaping inside an inline onclick attribute.
+    const nameLit = JSON.stringify(t.name);
     return '<div class="rule" style="flex-direction:column;align-items:stretch;gap:6px">' +
       '<div style="display:flex;justify-content:space-between;align-items:center">' +
       '<div class="text"><strong>' + t.name + '</strong> ' +
       '<span style="color:var(--text-muted);font-size:11px">every ' + t.interval_sec + 's · last ' + last + ' ' + stat + '</span></div>' +
       '<div class="actions">' +
-      '<button class="secondary" onclick="runTrigger(\'' + t.name + '\')">Run</button>' +
-      '<div class="toggle ' + (t.enabled ? 'on' : '') + '" onclick="toggleTrigger(\'' + t.name + '\')"></div>' +
-      '<button class="secondary" onclick="deleteTrigger(\'' + t.name + '\')">Delete</button>' +
+      '<button class="secondary" onclick="runTrigger(' + nameLit + ')">Run</button>' +
+      '<div class="toggle ' + (t.enabled ? 'on' : '') + '" onclick="toggleTrigger(' + nameLit + ')"></div>' +
+      '<button class="secondary" onclick="deleteTrigger(' + nameLit + ')">Delete</button>' +
       '</div></div>' +
       (t.description ? '<div style="color:var(--text-muted);font-size:12px">' + t.description + '</div>' : '') +
       '</div>';

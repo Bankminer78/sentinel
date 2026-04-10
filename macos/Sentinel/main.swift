@@ -343,25 +343,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
             w.isReleasedWhenClosed = false
 
             let config = WKWebViewConfiguration()
+            // Use a non-persistent data store so the WKWebView doesn't cache
+            // the dashboard HTML between sessions. The daemon is the source
+            // of truth for ui.py and the page should always reflect the
+            // currently-running version, not a stale snapshot.
+            config.websiteDataStore = WKWebsiteDataStore.nonPersistent()
+            // Enable Web Inspector so right-click → Inspect Element works
+            // inside the .app for debugging.
+            config.preferences.setValue(true, forKey: "developerExtrasEnabled")
             let wv = WKWebView(frame: w.contentView!.bounds, configuration: config)
             wv.autoresizingMask = [.width, .height]
             wv.setValue(false, forKey: "drawsBackground")
             wv.navigationDelegate = self
+            // Make the inspector explicitly available (macOS 13.3+ uses
+            // .isInspectable for this; older versions rely on the preference
+            // above).
+            if #available(macOS 13.3, *) {
+                wv.isInspectable = true
+            }
             w.contentView?.addSubview(wv)
 
             if let url = URL(string: SERVER_URL) {
-                wv.load(URLRequest(url: url))
+                var req = URLRequest(url: url)
+                req.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+                wv.load(req)
             }
             self.webView = wv
             window = w
         } else if let wv = self.webView {
-            // Window exists. If the page is in an error state (e.g., the
-            // daemon was killed and the WKWebView is showing
-            // ERR_CONNECTION_REFUSED), reload it.
-            if wv.url == nil || wv.url?.absoluteString == "about:blank" {
-                if let url = URL(string: SERVER_URL) {
-                    wv.load(URLRequest(url: url))
-                }
+            // Window exists — always force a fresh fetch on reopen so the
+            // user never sees a stale page or an error state from a prior
+            // daemon hiccup.
+            if let url = URL(string: SERVER_URL) {
+                var req = URLRequest(url: url)
+                req.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+                wv.load(req)
             }
         }
         NSApp.activate(ignoringOtherApps: true)
