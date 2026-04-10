@@ -788,16 +788,29 @@ async def agent_start(body: AgentRequest, authorization: Optional[str] = Header(
 
 @app.get("/api/agent/{session_id}/events")
 async def agent_events(session_id: str, authorization: Optional[str] = Header(None)):
-    """SSE stream of events for a running agent session."""
+    """SSE stream of events for a running agent session.
+
+    Sends ``: keepalive`` comment frames every 5 seconds when the queue is
+    idle. Without these, WebKit's fetch().body.getReader() in the WKWebView
+    times out long silent gaps (e.g. during a slow tool run) and the GUI
+    sees "Stream interrupted: Load failed" mid-session.
+    """
     _check_agent_token(authorization)
     queue = _AGENT_SESSIONS.get(session_id)
     if queue is None:
         raise HTTPException(404, "unknown session")
 
+    KEEPALIVE_SEC = 5.0
+
     async def event_stream():
         try:
             while True:
-                event = await queue.get()
+                try:
+                    event = await _asyncio.wait_for(queue.get(), timeout=KEEPALIVE_SEC)
+                except _asyncio.TimeoutError:
+                    # Idle — send a keepalive comment to keep WKWebView happy
+                    yield ": keepalive\n\n"
+                    continue
                 if event is _AGENT_SENTINEL:
                     yield "event: done\ndata: {}\n\n"
                     return

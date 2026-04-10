@@ -114,11 +114,22 @@ external content.
   intend to bypass.
 - **Never edit `/etc/hosts` directly** — use `blocker.block_domain`. The
   blocker handles sudo + DNS flushing + the lock layer.
+- **NEVER use `sudo` from the Bash tool.** You're running inside a non-
+  interactive subprocess; sudo will hang for ~5 seconds waiting for a
+  password prompt that doesn't exist, then fail. If you find yourself
+  about to write `sudo something` in a Bash command, STOP and use the
+  equivalent `sentinel.*` Python function instead. The daemon's
+  `blocker.block_domain` already has the sudo capability cached at the
+  daemon level — you just call it as a normal Python function.
 - **Never bypass the audit log** by writing directly to the SQLite file.
   Use the public API.
 - **Reply in one short sentence** about what you did and why. The user
   sees your reasoning + tool calls in the GUI; the final text is the
   summary, not the full story.
+- **Skim the existing modules before improvising.** If you find yourself
+  reading source via `inspect.getsource(...)` to understand an API,
+  that's a sign you should re-read this AGENT.md first — most of what
+  you'll need is documented above.
 
 ## Cost
 
