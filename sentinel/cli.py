@@ -20,6 +20,19 @@ def serve(port, host):
     # it with the http_fetch SSRF self-call defense.
     os.environ["SENTINEL_PORT"] = str(port)
 
+    # Check if another daemon already owns the port. If so, don't overwrite
+    # the bearer token file — the existing daemon wrote it and the Swift app
+    # may have already injected it into the WKWebView. Overwriting would
+    # cause a 401 mismatch. Just exit cleanly and let the existing daemon
+    # keep serving.
+    import socket as _sock
+    try:
+        with _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM) as s:
+            s.bind((host, port))
+    except OSError:
+        click.echo(f"Port {port} is already in use — another Sentinel daemon is running. Exiting.")
+        return
+
     # Generate a per-launch bearer token for the agent endpoint and write it
     # to a 0600 file the Swift app + GUI can read. Only processes running as
     # this user can open the file. The audit log is the deterrent against
