@@ -218,23 +218,67 @@ function handleSseFrame(raw) {
   renderAgentEvent(event);
 }
 
-// Track the last assistant_text we rendered so the final ResultMessage
-// (which carries the same text as the last AssistantMessage) doesn't
-// re-render it. The result event becomes a tiny "done + cost" marker.
+// Track the live streaming text block so we can append deltas to it in
+// place. The SDK now sends:
+//   assistant_text_start  → open a new text block (we create a div)
+//   assistant_text_delta  → append delta text to that div
+//   (no final assistant_text — the deltas already covered it)
+//   result                → final cost stamp; we compare to streamedBuffer
+//                           to know whether to re-render or just show "Done"
 let lastAssistantText = '';
+let streamingTextDiv = null;
+let streamingBuffer = '';
 
 function renderAgentEvent(event) {
   const t = event.type;
   if (t === 'session_started') {
     lastAssistantText = '';
+    streamingTextDiv = null;
+    streamingBuffer = '';
     appendChatEvent('assistant',
       '<div class="label">Session ' + escapeHtml(event.session_id) + '</div>' +
       '<span class="muted">started</span>');
+  } else if (t === 'assistant_text_start') {
+    // Open a new text-streaming chat-event div. We'll append delta text
+    // to its .text-content child as deltas arrive.
+    streamingBuffer = '';
+    streamingTextDiv = appendChatEvent('assistant',
+      '<div class="label">Assistant</div>' +
+      '<div class="text-content"></div>');
+  } else if (t === 'assistant_text_delta') {
+    // Append the delta to the live streaming div.
+    if (!streamingTextDiv) {
+      // No assistant_text_start was seen — open a buffer on the fly.
+      streamingTextDiv = appendChatEvent('assistant',
+        '<div class="label">Assistant</div>' +
+        '<div class="text-content"></div>');
+      streamingBuffer = '';
+    }
+    streamingBuffer += event.delta || '';
+    const target = streamingTextDiv.querySelector('.text-content');
+    if (target) {
+      target.textContent = streamingBuffer;
+      // Scroll to bottom so the user sees the latest text as it arrives
+      const events = document.getElementById('chat-events');
+      events.scrollTop = events.scrollHeight;
+    }
+    lastAssistantText = streamingBuffer;
   } else if (t === 'assistant_text') {
+    // Fallback path: an AssistantMessage with text that wasn't streamed
+    // via deltas (e.g. a tool-driven message). Render as a static block.
     lastAssistantText = event.text || '';
+    streamingTextDiv = null;
+    streamingBuffer = '';
     appendChatEvent('assistant',
       '<div class="label">Assistant</div>' + escapeHtml(event.text));
   } else if (t === 'tool_use') {
+    // A new tool call closes the current streaming text block.
+    if (streamingTextDiv) {
+      const tc = streamingTextDiv.querySelector('.text-content');
+      if (tc) tc.classList.add('done');
+    }
+    streamingTextDiv = null;
+    streamingBuffer = '';
     const inputStr = typeof event.input === 'string'
       ? event.input
       : JSON.stringify(event.input, null, 2);
@@ -250,10 +294,16 @@ function renderAgentEvent(event) {
       '<div class="detail"><pre>' + escapeHtml(result) + '</pre></div>');
   } else if (t === 'result') {
     // The SDK emits ResultMessage.result with the same text as the last
-    // AssistantMessage we already rendered. Only show the cost stamp +
-    // a "done" marker; suppress the duplicate text. If somehow the
-    // result text differs from the last assistant_text (e.g. there
-    // was no assistant_text at all), fall back to showing it.
+    // assistant block we already rendered (whether via deltas or full).
+    // Only show the cost stamp + a "done" marker; suppress the duplicate
+    // text. If the result text differs (e.g. no assistant text at all),
+    // fall back to showing the full thing.
+    if (streamingTextDiv) {
+      const tc = streamingTextDiv.querySelector('.text-content');
+      if (tc) tc.classList.add('done');
+    }
+    streamingTextDiv = null;
+    streamingBuffer = '';
     const cost = event.cost_usd != null ? '$' + event.cost_usd.toFixed(4) : 'free';
     const resultText = event.result || '';
     const isDuplicate = resultText && resultText === lastAssistantText;

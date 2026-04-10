@@ -42,6 +42,7 @@ from claude_agent_sdk import (
     ToolUseBlock,
     ToolResultBlock,
     RateLimitEvent,
+    StreamEvent,
     HookMatcher,
 )
 
@@ -268,6 +269,9 @@ async def run_session(prompt: str, session_id: str | None = None,
             "SENTINEL_AGENT_SESSION": sid,
         },
         allowed_tools=["Bash"],
+        # Stream Claude's text token-by-token via StreamEvent so the GUI
+        # can render the response live as it's being generated.
+        include_partial_messages=True,
         hooks={
             "PreToolUse": [
                 HookMatcher(matcher=".*", hooks=[_make_audit_hook(conn, sid)])
@@ -280,19 +284,62 @@ async def run_session(prompt: str, session_id: str | None = None,
 
     yield {"type": "session_started", "session_id": sid}
 
+    # Track which text blocks we've already streamed via StreamEvent so the
+    # final AssistantMessage doesn't double-emit the same text. We index by
+    # the (message, content_block_index) pair via a "currently streaming"
+    # marker that flips when message_start fires.
+    streamed_text_indices: set[int] = set()
+    current_message_streaming = False
+
     try:
         async for msg in query(prompt=prompt, options=options):
-            if isinstance(msg, AssistantMessage):
-                for block in msg.content:
-                    if isinstance(block, TextBlock):
-                        yield {"type": "assistant_text",
+            if isinstance(msg, StreamEvent):
+                # Raw Anthropic API stream event — extract text deltas for
+                # token-by-token live rendering.
+                ev = msg.event or {}
+                ev_type = ev.get("type")
+                if ev_type == "message_start":
+                    current_message_streaming = True
+                    streamed_text_indices.clear()
+                elif ev_type == "content_block_start":
+                    block = ev.get("content_block") or {}
+                    idx = ev.get("index")
+                    if block.get("type") == "text" and idx is not None:
+                        streamed_text_indices.add(idx)
+                        yield {"type": "assistant_text_start",
                                "session_id": sid,
-                               "text": block.text}
+                               "index": idx}
+                elif ev_type == "content_block_delta":
+                    delta = ev.get("delta") or {}
+                    idx = ev.get("index")
+                    if delta.get("type") == "text_delta":
+                        text = delta.get("text", "")
+                        if text:
+                            yield {"type": "assistant_text_delta",
+                                   "session_id": sid,
+                                   "index": idx,
+                                   "delta": text}
+                elif ev_type == "message_stop":
+                    current_message_streaming = False
+            elif isinstance(msg, AssistantMessage):
+                for i, block in enumerate(msg.content):
+                    if isinstance(block, TextBlock):
+                        # If we already streamed this text via StreamEvent
+                        # deltas, don't re-emit the whole thing. Otherwise
+                        # (e.g. a tool that produces a synthetic message
+                        # without going through the streaming path), emit
+                        # the full text as a fallback.
+                        if i not in streamed_text_indices:
+                            yield {"type": "assistant_text",
+                                   "session_id": sid,
+                                   "text": block.text}
                     elif isinstance(block, ToolUseBlock):
                         yield {"type": "tool_use",
                                "session_id": sid,
                                "tool": block.name,
                                "input": _truncate(block.input)}
+                # Reset the streaming-text tracker for the next message
+                streamed_text_indices.clear()
             elif isinstance(msg, UserMessage):
                 for block in msg.content:
                     if isinstance(block, ToolResultBlock):
