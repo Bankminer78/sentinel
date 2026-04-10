@@ -384,7 +384,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         window?.makeKeyAndOrderFront(nil)
     }
 
-    // MARK: - WKNavigationDelegate (auto-recover from page-load failures)
+    // MARK: - WKNavigationDelegate (auto-recover + bearer token injection)
+
+    /// Read the per-launch agent bearer token from the 0600 file the daemon
+    /// wrote at startup, and inject it into the page as window.SENTINEL_TOKEN
+    /// so the dashboard JS can include it in /api/agent/* requests.
+    private func injectAgentToken(into wv: WKWebView) {
+        let tokenPath = "\(NSHomeDirectory())/Library/Application Support/Sentinel/agent.token"
+        guard let token = try? String(contentsOfFile: tokenPath, encoding: .utf8)
+                                    .trimmingCharacters(in: .whitespacesAndNewlines),
+              !token.isEmpty else {
+            debugLog("agent token not yet available at \(tokenPath)")
+            return
+        }
+        // Escape just in case — token is base64url so it shouldn't contain quotes,
+        // but be defensive.
+        let escaped = token
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let js = "window.SENTINEL_TOKEN = \"\(escaped)\";"
+        wv.evaluateJavaScript(js) { _, err in
+            if let err = err {
+                debugLog("token injection failed: \(err.localizedDescription)")
+            }
+        }
+    }
+
+    func webView(_ wv: WKWebView, didFinish navigation: WKNavigation!) {
+        // Page loaded successfully — inject the bearer token so the dashboard
+        // JS can call /api/agent/* endpoints.
+        injectAgentToken(into: wv)
+    }
 
     func webView(_ wv: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         debugLog("webView didFailProvisionalNavigation: \(error.localizedDescription)")

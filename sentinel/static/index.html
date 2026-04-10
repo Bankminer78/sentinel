@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sentinel</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <h1>Sentinel</h1>
+    <nav class="nav">
+      <button class="active" data-tab="dashboard">Dashboard</button>
+      <button data-tab="chat">Chat</button>
+      <button data-tab="locks">Locks</button>
+      <button data-tab="audit">Audit</button>
+      <button data-tab="rules">Rules</button>
+      <button data-tab="activity">Activity</button>
+      <button data-tab="settings">Settings</button>
+    </nav>
+  </aside>
+  <main class="main">
+
+    <div id="tab-dashboard">
+      <h2>Today</h2>
+      <p class="sub">Your productivity at a glance.</p>
+      <div class="row">
+        <div class="stat"><div class="label">Score</div><div class="value green" id="score">—</div></div>
+        <div class="stat"><div class="label">Active rules</div><div class="value" id="rules-count">—</div></div>
+        <div class="stat"><div class="label">Active locks</div><div class="value" id="locks-count">—</div></div>
+        <div class="stat"><div class="label">Today's agent spend</div><div class="value" id="budget-used">—</div></div>
+      </div>
+      <div class="card" style="margin-top:16px">
+        <h3>Currently</h3>
+        <div id="current-activity" class="empty">Loading…</div>
+      </div>
+      <div class="card">
+        <h3>Top distractions (7 days)</h3>
+        <div id="top-distractions" class="empty">Loading…</div>
+      </div>
+    </div>
+
+    <div id="tab-chat" style="display:none">
+      <h2>Chat with the agent</h2>
+      <p class="sub">Tell Claude what to do. It can read your activity, write blocks, create commitments, install scheduled policies. Every action is logged in the Audit tab.</p>
+      <div class="card chat-card">
+        <div id="chat-events" class="chat-events"></div>
+        <div class="chat-input">
+          <textarea id="chat-input" rows="3" placeholder="e.g. Block YouTube every weekday from 9 to 5, with a 5-minute wait gate to disable"></textarea>
+          <button class="primary" id="chat-send-btn">Send</button>
+        </div>
+        <div class="chat-status">
+          <span id="chat-budget" class="muted"></span>
+        </div>
+      </div>
+    </div>
+
+    <div id="tab-locks" style="display:none">
+      <h2>Locks</h2>
+      <p class="sub">Active commitments. Once a lock is in place, the action it protects cannot be undone until expiry — except via emergency exit (limited per month).</p>
+      <div id="locks-list"></div>
+    </div>
+
+    <div id="tab-audit" style="display:none">
+      <h2>Audit log</h2>
+      <p class="sub">Every action — yours, the agent's, the trigger system's. This is the source of truth for what's been done to your system.</p>
+      <div class="filters">
+        <input id="audit-filter-actor" placeholder="Filter by actor (e.g. agent:abc123, user, policy:foo)" />
+        <input id="audit-filter-primitive" placeholder="Filter by primitive (e.g. block_domain, agent_tool.Bash)" />
+        <button class="secondary" id="audit-refresh-btn">Refresh</button>
+      </div>
+      <div id="audit-list"></div>
+    </div>
+
+    <div id="tab-rules" style="display:none">
+      <h2>Rules</h2>
+      <p class="sub">Write rules in plain English. The activity classifier parses them.</p>
+      <div class="card">
+        <input id="new-rule" placeholder="e.g. Block YouTube during work hours" />
+        <button class="primary" style="margin-top:8px" id="add-rule-btn">Add rule</button>
+      </div>
+      <div id="rules-list"></div>
+    </div>
+
+    <div id="tab-activity" style="display:none">
+      <h2>Activity</h2>
+      <p class="sub">Your recent browsing and app usage.</p>
+      <div class="card" id="activity-feed"></div>
+    </div>
+
+    <div id="tab-settings" style="display:none">
+      <h2>Settings</h2>
+      <p class="sub">Configure your Sentinel.</p>
+      <div class="card">
+        <h3>Daily agent token budget</h3>
+        <p class="muted small">How much you're willing to spend on Claude API calls per day. Past this, the agent endpoint refuses sessions until tomorrow.</p>
+        <input id="budget-input" type="number" step="0.10" min="0" placeholder="1.00" />
+        <span class="muted small"> USD/day</span>
+        <button class="primary" style="margin-left:8px" id="save-budget-btn">Save</button>
+      </div>
+      <div class="card">
+        <h3>Gemini API key (for vision + classification)</h3>
+        <input id="api-key" type="password" placeholder="AIza..." />
+        <button class="primary" style="margin-top:8px" id="save-api-key-btn">Save</button>
+      </div>
+      <div class="card">
+        <h3>Privacy level</h3>
+        <select id="privacy-level">
+          <option value="minimal">Minimal — no LLM, nothing stored</option>
+          <option value="balanced" selected>Balanced — LLM enabled, URLs stored</option>
+          <option value="full">Full — everything stored</option>
+        </select>
+      </div>
+      <div class="card">
+        <h3>Emergency exits</h3>
+        <p class="muted small">Your remaining monthly emergency exits. Use them to break out of a lock when you genuinely need to.</p>
+        <div id="emergency-status" class="muted">Loading…</div>
+      </div>
+      <div class="card">
+        <h3>Backup</h3>
+        <button class="secondary" id="backup-btn">Create backup now</button>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

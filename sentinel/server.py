@@ -10,9 +10,11 @@ LLM calls, store).
 """
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Optional, Any
+from pathlib import Path as _StaticPath
 from . import (
     db, classifier, monitor, blocker, skiplist, persistence,
     stats as stats_mod, query as query_mod, ai_store, screenshots,
@@ -58,10 +60,14 @@ def shutdown():
     policy_runner_mod.stop()
 
 
-# --- Web UI ---
+# --- Web UI: static files ---
+_STATIC_DIR = _StaticPath(__file__).parent / "static"
+app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
+
 @app.get("/", response_class=HTMLResponse)
 def root_ui():
-    return ui.get_ui_html()
+    return FileResponse(_STATIC_DIR / "index.html")
 
 
 # --- Health ---
