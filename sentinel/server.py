@@ -8,9 +8,9 @@ Almost every "feature" lives in triggers now. This file is transport + a few
 critical primitives the agent can't build itself (OS-level blocking, monitor,
 LLM calls, store).
 """
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, Any
 from . import (
@@ -22,6 +22,7 @@ from . import (
     screen as screen_mod, emergency as emergency_mod,
     audit as audit_mod, sandbox as sandbox_mod,
     primitives as primitives_mod,
+    agent as agent_mod, policy_runner as policy_runner_mod,
 )
 
 app = FastAPI(title="Sentinel")
@@ -43,6 +44,7 @@ def startup():
     monitor.start()
     persistence.start_watcher()
     triggers_mod.start_worker(conn)
+    policy_runner_mod.start()
     # Tell the http_fetch primitive which port we're on so it can refuse
     # the agent calling its own admin endpoints. The CLI passes the port
     # via the SENTINEL_PORT env var; default to 9849.
@@ -53,6 +55,7 @@ def startup():
 @app.on_event("shutdown")
 def shutdown():
     triggers_mod.stop_worker()
+    policy_runner_mod.stop()
 
 
 # --- Web UI ---
@@ -675,3 +678,104 @@ async def triggers_author(body: TriggerAuthor):
         raise HTTPException(502, f"LLM upstream error: {e.response.status_code}")
     except httpx.HTTPError as e:
         raise HTTPException(502, f"LLM network error: {e}")
+
+
+# --- Claude agent surface (Phase 1 of the lockbox refactor) ---
+
+import asyncio as _asyncio
+import json as _json
+import os as _os_agent
+import uuid as _uuid
+
+
+# Per-session event queues. The POST handler kicks off a background task
+# that drains query() messages into the session's queue; the SSE GET handler
+# pops events off the queue and writes them to the client. The queue is
+# bounded so a runaway agent can't OOM the daemon.
+_AGENT_SESSIONS: dict[str, _asyncio.Queue] = {}
+_AGENT_SENTINEL = object()  # marks end-of-stream on the queue
+
+
+def _check_agent_token(authorization: Optional[str]):
+    """Reject anything without the per-launch bearer token."""
+    expected = _os_agent.environ.get("SENTINEL_AGENT_TOKEN")
+    if not expected:
+        raise HTTPException(503, "agent token not configured")
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(401, "missing bearer token")
+    if authorization.removeprefix("Bearer ").strip() != expected:
+        raise HTTPException(401, "invalid bearer token")
+
+
+class AgentRequest(BaseModel):
+    prompt: str
+    session_id: Optional[str] = None
+
+
+@app.post("/api/agent")
+async def agent_start(body: AgentRequest, authorization: Optional[str] = Header(None)):
+    """Spawn a Claude session in the background. Returns immediately with
+    a session_id; the GUI then opens an SSE connection to /api/agent/{sid}/events
+    to stream the reasoning + tool calls + result live."""
+    _check_agent_token(authorization)
+    if not body.prompt or not body.prompt.strip():
+        raise HTTPException(400, "prompt required")
+
+    sid = body.session_id or _uuid.uuid4().hex[:12]
+    queue: _asyncio.Queue = _asyncio.Queue(maxsize=200)
+    _AGENT_SESSIONS[sid] = queue
+
+    async def _drain():
+        try:
+            async for event in agent_mod.run_session(body.prompt, session_id=sid, conn=get_conn()):
+                try:
+                    queue.put_nowait(event)
+                except _asyncio.QueueFull:
+                    # GUI is slow draining; drop the oldest event and retry
+                    try:
+                        queue.get_nowait()
+                    except _asyncio.QueueEmpty:
+                        pass
+                    queue.put_nowait(event)
+        finally:
+            try:
+                queue.put_nowait(_AGENT_SENTINEL)
+            except _asyncio.QueueFull:
+                pass
+
+    _asyncio.create_task(_drain())
+    return {"session_id": sid, "events_url": f"/api/agent/{sid}/events"}
+
+
+@app.get("/api/agent/{session_id}/events")
+async def agent_events(session_id: str, authorization: Optional[str] = Header(None)):
+    """SSE stream of events for a running agent session."""
+    _check_agent_token(authorization)
+    queue = _AGENT_SESSIONS.get(session_id)
+    if queue is None:
+        raise HTTPException(404, "unknown session")
+
+    async def event_stream():
+        try:
+            while True:
+                event = await queue.get()
+                if event is _AGENT_SENTINEL:
+                    yield "event: done\ndata: {}\n\n"
+                    return
+                yield f"data: {_json.dumps(event, default=str)}\n\n"
+        finally:
+            _AGENT_SESSIONS.pop(session_id, None)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.get("/api/agent/budget")
+async def agent_budget(authorization: Optional[str] = Header(None)):
+    """How much of the daily Claude token budget is left."""
+    _check_agent_token(authorization)
+    c = get_conn()
+    return {
+        "budget_usd": agent_mod.get_budget_usd(c),
+        "used_usd": agent_mod.get_used_today_usd(c),
+        "remaining_usd": agent_mod.remaining_budget_usd(c),
+    }
