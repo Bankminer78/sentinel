@@ -171,6 +171,11 @@ button.secondary:hover { background: rgba(255,255,255,0.06); }
 .chat-event .detail { display: none; }
 .chat-event .detail.open { display: block; }
 
+.chat-cost-stamp {
+  text-align: right; font-size: 10px; color: var(--text-muted);
+  padding: 2px 8px; opacity: 0.6;
+}
+
 .chat-input {
   display: flex; gap: 8px; margin-top: 12px;
   padding-top: 12px; border-top: 1px solid var(--border);

@@ -232,25 +232,17 @@ let streamingBuffer = '';
 function renderAgentEvent(event) {
   const t = event.type;
   if (t === 'session_started') {
+    // Silent — no UI noise for session lifecycle
     lastAssistantText = '';
     streamingTextDiv = null;
     streamingBuffer = '';
-    appendChatEvent('assistant',
-      '<div class="label">Session ' + escapeHtml(event.session_id) + '</div>' +
-      '<span class="muted">started</span>');
   } else if (t === 'assistant_text_start') {
-    // Open a new text-streaming chat-event div. We'll append delta text
-    // to its .text-content child as deltas arrive.
     streamingBuffer = '';
     streamingTextDiv = appendChatEvent('assistant',
-      '<div class="label">Assistant</div>' +
       '<div class="text-content"></div>');
   } else if (t === 'assistant_text_delta') {
-    // Append the delta to the live streaming div.
     if (!streamingTextDiv) {
-      // No assistant_text_start was seen — open a buffer on the fly.
       streamingTextDiv = appendChatEvent('assistant',
-        '<div class="label">Assistant</div>' +
         '<div class="text-content"></div>');
       streamingBuffer = '';
     }
@@ -264,13 +256,10 @@ function renderAgentEvent(event) {
     }
     lastAssistantText = streamingBuffer;
   } else if (t === 'assistant_text') {
-    // Fallback path: an AssistantMessage with text that wasn't streamed
-    // via deltas (e.g. a tool-driven message). Render as a static block.
     lastAssistantText = event.text || '';
     streamingTextDiv = null;
     streamingBuffer = '';
-    appendChatEvent('assistant',
-      '<div class="label">Assistant</div>' + escapeHtml(event.text));
+    appendChatEvent('assistant', escapeHtml(event.text));
   } else if (t === 'tool_use') {
     // A new tool call closes the current streaming text block.
     if (streamingTextDiv) {
@@ -283,14 +272,12 @@ function renderAgentEvent(event) {
       ? event.input
       : JSON.stringify(event.input, null, 2);
     appendChatEvent('tool-use',
-      '<div class="label">Tool: ' + escapeHtml(event.tool || '?') + '</div>' +
-      '<span class="toggle-detail" data-action="toggle">Show command</span>' +
+      '<span class="toggle-detail" data-action="toggle">' + escapeHtml(event.tool || 'Tool') + '</span>' +
       '<div class="detail"><pre>' + escapeHtml(inputStr) + '</pre></div>');
   } else if (t === 'tool_result') {
     const result = event.result || '';
     appendChatEvent('tool-result',
-      '<div class="label">Result</div>' +
-      '<span class="toggle-detail" data-action="toggle">Show output</span>' +
+      '<span class="toggle-detail" data-action="toggle">Output</span>' +
       '<div class="detail"><pre>' + escapeHtml(result) + '</pre></div>');
   } else if (t === 'result') {
     // The SDK emits ResultMessage.result with the same text as the last
@@ -308,26 +295,22 @@ function renderAgentEvent(event) {
     const resultText = event.result || '';
     const isDuplicate = resultText && resultText === lastAssistantText;
     if (isDuplicate) {
-      appendChatEvent('result',
-        '<div class="label">Done · ' + escapeHtml(cost) + '</div>');
+      // Just a tiny cost stamp, no duplicate text
+      const stamp = document.createElement('div');
+      stamp.className = 'chat-cost-stamp';
+      stamp.textContent = cost;
+      document.getElementById('chat-events').appendChild(stamp);
     } else {
-      appendChatEvent('result',
-        '<div class="label">Final · ' + escapeHtml(cost) + '</div>' +
-        escapeHtml(resultText));
+      appendChatEvent('result', escapeHtml(resultText));
     }
   } else if (t === 'rate_limit') {
-    appendChatEvent('tool-use',
-      '<div class="label">Rate limit</div><span class="muted">' +
-      escapeHtml(event.info || '') + '</span>');
+    // Silent — rate limit info is noisy and not actionable for the user
   } else if (t === 'budget_refused') {
     appendChatEvent('error',
-      '<div class="label">Budget exhausted</div>' +
-      'Daily budget $' + (event.budget_usd || 0).toFixed(2) +
-      ' already used. Adjust in Settings or wait for the day to roll over.');
+      'Daily budget ($' + (event.budget_usd || 0).toFixed(2) +
+      ') exhausted. Adjust in Settings or wait until tomorrow.');
   } else if (t === 'error') {
-    appendChatEvent('error',
-      '<div class="label">' + escapeHtml(event.error_type || 'Error') + '</div>' +
-      escapeHtml(event.message || ''));
+    appendChatEvent('error', escapeHtml(event.message || event.error_type || 'Error'));
   }
 }
 
@@ -341,7 +324,7 @@ document.addEventListener('click', (e) => {
 
 document.getElementById('chat-send-btn').addEventListener('click', sendChat);
 document.getElementById('chat-input').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) sendChat();
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); };
 });
 
 // --- Locks tab ---
