@@ -178,19 +178,44 @@ def test_run_session_proceeds_when_under_budget(conn):
     assert len(finished) == 1
 
 
-def test_run_session_streams_assistant_text_blocks(conn):
-    """AssistantMessage with TextBlock children → assistant_text events."""
+def test_run_session_streams_text_deltas(conn):
+    """StreamEvent content_block_delta → assistant_text_delta events.
+
+    In streaming mode (include_partial_messages=True), text arrives via
+    StreamEvent, not via AssistantMessage.TextBlock. The AssistantMessage
+    is intentionally skipped for TextBlocks to avoid the duplicate-text
+    bug that was reported in production.
+    """
     db.set_config(conn, "daily_token_budget_usd", "1.00")
 
     async def fake_query(*, prompt, options, transport=None):
-        from claude_agent_sdk import AssistantMessage, TextBlock, ResultMessage
+        from claude_agent_sdk import StreamEvent, AssistantMessage, TextBlock, ResultMessage
+        # 1. StreamEvent: content_block_start for a text block
+        yield MagicMock(spec=StreamEvent, event={
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "text", "text": ""},
+        })
+        # 2. StreamEvent: two text deltas
+        yield MagicMock(spec=StreamEvent, event={
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "I'll do "},
+        })
+        yield MagicMock(spec=StreamEvent, event={
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "that now."},
+        })
+        # 3. AssistantMessage with the full text (should be SUPPRESSED)
         m = MagicMock(spec=AssistantMessage)
         block = MagicMock(spec=TextBlock)
         block.text = "I'll do that now."
         m.content = [block]
         yield m
+        # 4. ResultMessage
         r = MagicMock(spec=ResultMessage)
-        r.result = "done"
+        r.result = "I'll do that now."
         r.total_cost_usd = 0
         r.subtype = "success"
         yield r
@@ -200,9 +225,15 @@ def test_run_session_streams_assistant_text_blocks(conn):
             return [e async for e in agent.run_session("hi", conn=conn)]
         events = asyncio.run(collect())
 
-    text_events = [e for e in events if e["type"] == "assistant_text"]
-    assert len(text_events) == 1
-    assert text_events[0]["text"] == "I'll do that now."
+    # The text arrived via deltas, NOT via assistant_text
+    delta_events = [e for e in events if e["type"] == "assistant_text_delta"]
+    assert len(delta_events) == 2
+    assert delta_events[0]["delta"] == "I'll do "
+    assert delta_events[1]["delta"] == "that now."
+
+    # No assistant_text fallback (the duplicate bug was exactly this)
+    fallback = [e for e in events if e["type"] == "assistant_text"]
+    assert len(fallback) == 0
 
 
 def test_run_session_streams_tool_use_blocks(conn):
