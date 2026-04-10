@@ -535,21 +535,35 @@ def _summarize(value: Any, max_len: int = 200) -> str:
 
 def _execute_steps(conn, steps: list, locals_dict: dict, ctx: dict,
                    depth: int = 0, run_log: list | None = None) -> list:
+    """Run a list of steps, appending one entry per step to run_log.
+
+    Each error entry carries an ``error_category`` (a fixed enum) so that
+    sanitization for the LLM revise loop can be a clean field projection,
+    not regex parsing of free-text error messages.
+    """
     if run_log is None:
         run_log = []
     if depth > 8:
-        run_log.append({"type": "error", "error": "max nesting depth exceeded"})
+        run_log.append({"type": "error", "status": "error",
+                        "error_category": "nested_too_deep"})
         return run_log
     for step in steps:
         if "when" in step:
             try:
                 passed = _evaluate_condition(step["when"], locals_dict)
             except Exception as e:
-                run_log.append({"type": "when", "var": step["when"].get("var"),
-                                "status": "error", "error": str(e)})
+                run_log.append({
+                    "type": "when",
+                    "var": step["when"].get("var"),
+                    "op": step["when"].get("op"),
+                    "status": "error",
+                    "error_category": "condition_eval_failed",
+                    "exception_type": type(e).__name__,
+                })
                 continue
             run_log.append({"type": "when", "var": step["when"].get("var"),
-                            "op": step["when"].get("op"), "passed": passed})
+                            "op": step["when"].get("op"), "passed": passed,
+                            "status": "ok"})
             if passed and "do" in step:
                 _execute_steps(conn, step["do"], locals_dict, ctx, depth + 1, run_log)
             continue
@@ -557,28 +571,44 @@ def _execute_steps(conn, steps: list, locals_dict: dict, ctx: dict,
             call_name = step["call"]
             fn = CALLS.get(call_name)
             if not fn:
-                run_log.append({"type": "call", "call": call_name,
-                                "status": "error", "error": "unknown call"})
+                run_log.append({
+                    "type": "call", "call": call_name,
+                    "status": "error", "error_category": "unknown_call",
+                })
                 continue
             try:
                 args = _substitute(step.get("args", {}) or {}, locals_dict)
             except Exception as e:
-                run_log.append({"type": "call", "call": call_name,
-                                "status": "error", "error": f"arg substitution: {e}"})
+                run_log.append({
+                    "type": "call", "call": call_name,
+                    "status": "error",
+                    "error_category": "arg_substitution_failed",
+                    "exception_type": type(e).__name__,
+                })
                 continue
             try:
                 result = fn(conn, args, ctx)
                 step_status = _step_status(result)
+                # The `result` and `error` fields are kept for the run-history
+                # debugger UI. The sanitization layer in
+                # _sanitize_run_for_revise() drops both before they reach the
+                # LLM — that's the prompt-injection defense.
                 entry = {"type": "call", "call": call_name, "status": step_status,
                          "result": _summarize(result)}
                 if step_status == "error":
+                    entry["error_category"] = "step_returned_error"
                     if isinstance(result, dict):
                         entry["error"] = result.get("error") or result.get("reason") or "step returned ok=false"
                 run_log.append(entry)
             except Exception as e:
                 result = {"error": f"{type(e).__name__}: {e}"}
-                run_log.append({"type": "call", "call": call_name,
-                                "status": "error", "error": result["error"]})
+                run_log.append({
+                    "type": "call", "call": call_name,
+                    "status": "error",
+                    "error_category": "step_raised",
+                    "exception_type": type(e).__name__,
+                    "error": result["error"],  # for run history; sanitization drops it
+                })
             save_as = step.get("save_as")
             if save_as:
                 locals_dict[save_as] = result
@@ -828,24 +858,136 @@ async def author_from_text(api_key: str, request: str) -> dict:
     return obj
 
 
+# --- Revise-loop sanitization (anti-prompt-injection) ---
+#
+# When a recipe fails, the daemon asks Gemini to author a fix. The failure
+# context the LLM sees MUST NOT contain any payload data (HTTP body strings,
+# SQL row contents, iMessage text, exception messages with embedded user
+# input). Otherwise a malicious string anywhere downstream becomes a
+# code-authoring channel: a prompt injection in an iMessage can rewrite the
+# recipe to exfiltrate chat.db.
+#
+# Defense: every error entry in the run log carries an `error_category` (a
+# fixed enum the executor sets at error-time) plus `exception_type` (a
+# class name, never the message). The sanitization layer below builds the
+# revise prompt from those structured fields only, plus a TYPE-ONLY
+# skeleton of the locals dict (so the agent can see "this var has these
+# keys" without seeing the values).
+
+_LOCAL_SKELETON_MAX_DEPTH = 4
+_LOCAL_SKELETON_MAX_LIST = 3
+
+
+def _value_skeleton(value, depth: int = 0):
+    """Return a payload-free type skeleton of a value.
+
+    Strings/numbers/bools become their type tag. Dicts recurse with keys
+    intact. Lists show their length and the skeleton of the first few
+    elements. Bytes/blobs are summarized by length only.
+    """
+    if depth >= _LOCAL_SKELETON_MAX_DEPTH:
+        return f"<{type(value).__name__}>"
+    if value is None:
+        return "<null>"
+    if isinstance(value, bool):
+        return "<bool>"
+    if isinstance(value, int):
+        return "<int>"
+    if isinstance(value, float):
+        return "<float>"
+    if isinstance(value, str):
+        return "<str>"
+    if isinstance(value, bytes):
+        return f"<bytes len={len(value)}>"
+    if isinstance(value, dict):
+        return {k: _value_skeleton(v, depth + 1) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        head = [_value_skeleton(v, depth + 1) for v in list(value)[:_LOCAL_SKELETON_MAX_LIST]]
+        return {"<list>": head, "len": len(value)}
+    return f"<{type(value).__name__}>"
+
+
+# Fields that may carry user data — stripped before sanitization.
+_PAYLOAD_FIELDS = {"result", "error"}
+
+
+def _sanitize_step_entry(entry: dict) -> dict:
+    """Project a run_log entry to its payload-free fields.
+
+    Keeps: type, call, var, op, passed, status, error_category, exception_type.
+    Drops: result (truncated payload), error (free-text message).
+    """
+    out = {}
+    for k, v in entry.items():
+        if k in _PAYLOAD_FIELDS:
+            continue
+        out[k] = v
+    return out
+
+
+def _sanitize_run_for_revise(run_log: list, locals_dict: dict,
+                             fatal_error: str | None) -> dict:
+    """Build the structured failure context the LLM sees on revise.
+
+    Returns a dict with:
+      - steps: payload-free per-step records
+      - locals_skeleton: type skeleton of the final locals (no values)
+      - fatal_error_type: class name of any fatal exception (never the message)
+      - failed_step_count: how many steps were marked error
+    """
+    sanitized_steps = [_sanitize_step_entry(e) for e in (run_log or [])]
+    failed = sum(1 for e in sanitized_steps if e.get("status") == "error")
+    # fatal_error today is the human error_msg built in run_once. Strip it
+    # to just the type name when it came from an exception, otherwise drop.
+    fatal_type = None
+    if fatal_error:
+        # The format is "ExceptionType: message" — keep only the type.
+        first = fatal_error.split(":", 1)[0].strip()
+        if first and first.endswith("Error"):
+            fatal_type = first
+    return {
+        "steps": sanitized_steps,
+        "locals_skeleton": _value_skeleton(locals_dict or {}),
+        "fatal_error_type": fatal_type,
+        "failed_step_count": failed,
+    }
+
+
 REVISE_PROMPT = """You authored a recipe that failed when test-run. Fix it.
 
 ORIGINAL USER REQUEST: "{request}"
 
-PRIOR ATTEMPT: {prior_spec}
+PRIOR ATTEMPT (the recipe you wrote — which is structured JSON, not user data):
+{prior_spec}
 
-WHAT HAPPENED ON RUN:
-- run status: {run_status}
-- error summary: {error}
-- step log (in order, with results truncated): {steps}
-- final locals (after all steps): {locals}
+WHAT HAPPENED ON THE TEST RUN (sanitized — payloads have been stripped to
+prevent prompt-injection from primitive return values; you see structure
+only, not contents):
 
-Common bugs to check first:
-- Compared a wrapper dict instead of an inner field (e.g. condition var "score" but get_score returns {{score: float}}, so use "score.score").
-- Template ${{var.path}} produced an empty string because the path was wrong — verify each var path against the actual return shape.
-- Used a call name that doesn't exist.
-- {{ok: false, reason: ...}} from a call means args were wrong (e.g. missing/empty domain).
-- A `when` clause never fires because the comparison value type doesn't match (string vs int).
+{sanitized}
+
+Each step entry tells you: which call was made, whether it succeeded, and
+on failure an `error_category` (one of: unknown_call, arg_substitution_failed,
+step_returned_error, step_raised, condition_eval_failed, nested_too_deep)
+plus an `exception_type` if the failure raised. The locals_skeleton shows
+the SHAPE of each saved variable (its keys and value types) but never the
+values themselves.
+
+Common bug categories and what each implies:
+- error_category=unknown_call: you used a call name that doesn't exist —
+  pick one from the available operations below.
+- error_category=arg_substitution_failed: a ${{var.path}} template referenced
+  a path that didn't resolve. Check the locals_skeleton for the actual keys.
+- error_category=step_returned_error: the call ran but its preconditions
+  weren't met (e.g. a required arg was empty/missing). Check the call's
+  args against the shape spec below.
+- error_category=step_raised: the call's implementation raised an exception
+  (exception_type tells you which class). Usually an arg shape mismatch.
+- error_category=condition_eval_failed: a `when` clause's var/op/value
+  combination couldn't be evaluated.
+- A successful step with status=ok but a `when` clause whose passed=false
+  is not a failure — it just means the branch didn't fire. Fix this only
+  if the branch SHOULD have fired.
 
 AVAILABLE OPERATIONS (with shapes):
 {calls}
@@ -867,19 +1009,24 @@ No markdown, no explanation."""
 
 async def _revise_from_failure(api_key: str, request: str, prior_spec: dict | None,
                                failure: dict) -> dict:
-    """Ask the LLM to fix a recipe given a structured failure record.
+    """Ask the LLM to fix a recipe given a sanitized failure record.
 
-    failure may come from any phase: author/parse, validate, create, or run.
+    The failure dict carries `steps` (raw run log), `locals` (raw values),
+    and `error` (free-text). All three are passed through
+    _sanitize_run_for_revise() before being interpolated into the prompt.
+    The LLM never sees raw payload content from primitive return values.
     """
     from . import classifier
     calls_desc = "\n".join(f"- {k}: {v}" for k, v in list_calls().items())
+    sanitized = _sanitize_run_for_revise(
+        failure.get("steps", []),
+        failure.get("locals", {}),
+        failure.get("error"),
+    )
     prompt = REVISE_PROMPT.format(
         request=request,
         prior_spec=json.dumps(prior_spec or {}, default=str)[:2000],
-        run_status=failure.get("phase", "unknown") + "/" + str(failure.get("status", "")),
-        error=str(failure.get("error"))[:500],
-        steps=json.dumps(failure.get("steps", []), default=str)[:2500],
-        locals=json.dumps(failure.get("locals", {}), default=str)[:1500],
+        sanitized=json.dumps(sanitized, indent=2)[:3000],
         calls=calls_desc,
     )
     raw = await classifier.call_gemini(api_key, prompt, max_tokens=4000)
