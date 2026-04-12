@@ -1,8 +1,7 @@
-__pycache__/
-*.pyc
-*.egg-info/
-dist/
-build/
-.venv/
-*.db
 .DS_Store
+.build/
+.swiftpm/
+build/
+Package.resolved
+*.xcodeproj
+xcuserdata/
