@@ -11,10 +11,9 @@ final class AppState: ObservableObject {
     @Published var locks: [LockEntry] = []
     @Published var runningByName: [String: RunningInfo] = [:]
     @Published var paused: Bool = false
-    @Published var selectedLockName: String? = nil
     @Published var route: Route = .chat
 
-    enum Route: Equatable {
+    enum Route: Hashable {
         case chat
         case lock(String)   // lock name
         case activity

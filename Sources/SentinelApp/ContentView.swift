@@ -1,78 +1,82 @@
 // ContentView.swift — top-level SwiftUI layout.
-//
-// Phase 3 is a stub. Phase 4 puts a real LockListView in the sidebar.
-// Phase 5 puts a real ChatView in the content area. Phase 6 wires the
-// pause/emergency buttons in the sidebar footer.
 
 import SwiftUI
 import SentinelCore
 
 struct ContentView: View {
     @EnvironmentObject var state: AppState
+    @EnvironmentObject var processManager: ProcessManager
 
     var body: some View {
         NavigationSplitView {
-            SidebarPlaceholder()
-                .frame(minWidth: 220, idealWidth: 240)
+            VStack(spacing: 0) {
+                LockListView()
+                    .frame(minWidth: 220, idealWidth: 240)
+                Spacer(minLength: 0)
+                sidebarFooter
+            }
         } detail: {
-            ContentPlaceholder()
+            content
         }
         .navigationTitle("Sentinel")
     }
-}
 
-struct SidebarPlaceholder: View {
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("🛡 Sentinel")
-                    .font(.title3)
-                    .bold()
-                Spacer()
+    @ViewBuilder
+    private var content: some View {
+        switch state.route {
+        case .chat:
+            ChatPlaceholder()
+        case .activity:
+            ActivityPlaceholder()
+        case .lock(let name):
+            if let lock = state.locks.first(where: { $0.name == name }) {
+                LockDetailView(lock: lock)
+            } else {
+                Text("Lock not found").foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 14)
-            .padding(.bottom, 10)
-
-            Divider()
-
-            List {
-                Label("Chat", systemImage: "bubble.left.fill")
-                Label("Activity", systemImage: "list.bullet.rectangle")
-            }
-            .listStyle(.sidebar)
-
-            Spacer()
-
-            VStack(spacing: 6) {
-                Text("Phase 3 — sidebar will fill in next")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-            }
-            .padding(12)
         }
+    }
+
+    private var sidebarFooter: some View {
+        VStack(spacing: 6) {
+            Divider()
+            Text("Sentinel v\(SentinelCore.version)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.bottom, 10)
     }
 }
 
-struct ContentPlaceholder: View {
+private struct ChatPlaceholder: View {
     var body: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "shield.lefthalf.filled")
+        VStack(spacing: 10) {
+            Image(systemName: "bubble.left.and.bubble.right.fill")
                 .font(.system(size: 48))
                 .foregroundStyle(.tint)
-            Text("Sentinel")
-                .font(.largeTitle)
-                .bold()
-            Text("v\(SentinelCore.version) — phase 3 stub")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-            Text("Lock list lands in phase 4. Chat lands in phase 5.")
+            Text("Chat coming in phase 5")
+                .font(.title3)
+            Text("Phase 5 wires this up to the Claude Messages API.")
                 .font(.caption)
-                .foregroundStyle(.tertiary)
-                .padding(.top, 8)
+                .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(NSColor.windowBackgroundColor))
+    }
+}
+
+private struct ActivityPlaceholder: View {
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "list.bullet.rectangle")
+                .font(.system(size: 48))
+                .foregroundStyle(.tint)
+            Text("Activity log")
+                .font(.title3)
+            Text("Phase 6 reads the log table from the shared db.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

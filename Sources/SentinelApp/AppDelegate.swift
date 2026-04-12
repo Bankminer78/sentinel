@@ -12,6 +12,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow?
     var recorder: WorldRecorder?
     let state = AppState()
+    let processManager = ProcessManager()
+    var refreshTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Menu bar accessory — no Dock icon.
@@ -31,6 +33,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
 
+        // Make sure the locks directory exists, and seed the lock list
+        // before the window opens so the sidebar isn't empty for a beat.
+        LockStore.ensureDirExists()
+        state.locks = LockStore.listLocks()
+
         // Start the world recorder. It's the daemon-style component that
         // appends a row to the world table every couple of seconds.
         do {
@@ -41,6 +48,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSLog("[Sentinel] failed to start recorder: \(error)")
         }
 
+        // Periodically rescan the locks dir + refresh the running map
+        // from the shared db so the sidebar shows live state.
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 1.5,
+                                            repeats: true) { [weak self] _ in
+            self?.refreshFromDisk()
+        }
+
         // Open the window once at launch so the user sees something.
         DispatchQueue.main.async { [weak self] in
             self?.openWindow()
@@ -48,7 +62,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        refreshTimer?.invalidate()
         recorder?.stop()
+        processManager.stopAll()
+    }
+
+    /// Rescan the locks directory and the `running` table. Called every
+    /// 1.5s by the refresh timer so the sidebar shows fresh state without
+    /// the user having to click anything.
+    private func refreshFromDisk() {
+        let locks = LockStore.listLocks()
+        var running: [String: RunningInfo] = [:]
+        if let db = try? Database.shared(),
+           let rows = try? db.query("SELECT * FROM running") {
+            for row in rows {
+                guard let name = row.string("name"),
+                      let pid = row.int("pid"),
+                      let started = row.double("started_at"),
+                      let beat = row.double("last_heartbeat") else { continue }
+                running[name] = RunningInfo(
+                    pid: pid,
+                    startedAt: started,
+                    lastHeartbeat: beat,
+                    statusText: row.string("status_text"))
+            }
+        }
+        DispatchQueue.main.async {
+            self.state.locks = locks
+            self.state.runningByName = running
+        }
     }
 
     /// Re-opens the dashboard when the user clicks Sentinel.app while
@@ -82,7 +124,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func openWindow() {
         if window == nil {
-            let content = ContentView().environmentObject(state)
+            let content = ContentView()
+                .environmentObject(state)
+                .environmentObject(processManager)
             let hosting = NSHostingController(rootView: content)
             let w = NSWindow(contentViewController: hosting)
             w.title = "Sentinel"
