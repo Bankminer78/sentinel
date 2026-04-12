@@ -34,6 +34,14 @@ public final class Database {
     private var handle: OpaquePointer?
     private static var instance: Database?
     private static let instanceLock = NSLock()
+    // Serializes all public access to the sqlite3 handle. SQLite's
+    // "serialized" threading mode protects individual C calls, but a
+    // prepare→bind→step→finalize sequence across multiple C calls is
+    // NOT atomic — if two threads interleave their sequences on the
+    // same connection, you get an EXC_BAD_ACCESS inside sqlite3. This
+    // lock makes every public method (execute, query, queryFirst)
+    // atomic with respect to others on the same Database instance.
+    private let opLock = NSLock()
 
     /// Returns the process-wide shared Database. The first caller opens
     /// the file and runs migrations; subsequent callers in the same
@@ -92,6 +100,8 @@ public final class Database {
     }
 
     public func executeArr(_ sql: String, _ args: [Any?]) throws {
+        opLock.lock()
+        defer { opLock.unlock() }
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         try bind(stmt, args)
@@ -107,6 +117,8 @@ public final class Database {
     }
 
     public func queryArr(_ sql: String, _ args: [Any?]) throws -> [Row] {
+        opLock.lock()
+        defer { opLock.unlock() }
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         try bind(stmt, args)
