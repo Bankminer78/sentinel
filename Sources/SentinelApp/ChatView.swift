@@ -1,0 +1,436 @@
+// ChatView.swift — native SwiftUI chat with Claude streaming + lock
+// extraction + approve-to-disk.
+//
+// Format we expect Claude to emit (taught via the system prompt):
+//
+//     lock: hello.sh
+//     A short explanation paragraph.
+//
+//     ```bash
+//     #!/usr/bin/env bash
+//     # sentinel: name="Hello"
+//     ...
+//     ```
+//
+// We parse the `lock: <filename>` line and the first fenced code block
+// out of each assistant turn. If both are present, a "Review and install"
+// pane appears at the bottom of the chat with the script source and an
+// Approve button. Clicking Approve writes the file to the locks dir and
+// the AppDelegate's refresh timer surfaces it in the sidebar within ~1.5s.
+
+import SwiftUI
+
+struct ChatView: View {
+    @EnvironmentObject var state: AppState
+
+    @State private var messages: [ChatTurn] = []
+    @State private var streamingText: String = ""
+    @State private var isStreaming: Bool = false
+    @State private var inputText: String = ""
+    @State private var staged: StagedLock? = nil
+    @State private var apiKey: String? = ClaudeAPI.loadAPIKey()
+    @State private var errorBanner: String? = nil
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if apiKey == nil {
+                APIKeyMissingBanner()
+            }
+            if let err = errorBanner {
+                ErrorBanner(text: err) { errorBanner = nil }
+            }
+            messageList
+            if let staged = staged {
+                ReviewPane(staged: staged,
+                           onApprove: { approve(staged) },
+                           onReject:  { self.staged = nil })
+            }
+            inputBar
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: - Subviews
+
+    private var messageList: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 16) {
+                    if messages.isEmpty && streamingText.isEmpty {
+                        intro
+                            .padding(.top, 40)
+                    }
+                    ForEach(messages) { turn in
+                        MessageBubble(turn: turn)
+                            .id(turn.id)
+                    }
+                    if !streamingText.isEmpty || isStreaming {
+                        MessageBubble(turn: ChatTurn(
+                            role: .assistant,
+                            content: streamingText.isEmpty ? "…" : streamingText))
+                            .id("streaming")
+                    }
+                }
+                .padding()
+            }
+            .background(Color(nsColor: .textBackgroundColor))
+            .onChange(of: streamingText) { _ in
+                proxy.scrollTo("streaming", anchor: .bottom)
+            }
+            .onChange(of: messages.count) { _ in
+                if let last = messages.last {
+                    proxy.scrollTo(last.id, anchor: .bottom)
+                }
+            }
+        }
+    }
+
+    private var intro: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "wand.and.stars")
+                .font(.system(size: 36))
+                .foregroundStyle(.tint)
+            Text("Author a lock")
+                .font(.title3).bold()
+            Text("Describe what you want — Claude will write a script and you can review it before installing.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 460)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Examples:")
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
+                Text("• Block YouTube weekday mornings 9-noon")
+                Text("• Lock me to TextEdit and Wikipedia French Revolution for 2 minutes")
+                Text("• 25/5 pomodoro that notifies me at each cycle")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.top, 4)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private var inputBar: some View {
+        VStack(spacing: 0) {
+            Divider()
+            HStack(alignment: .bottom, spacing: 8) {
+                TextField("Describe a lock…",
+                          text: $inputText,
+                          axis: .vertical)
+                    .textFieldStyle(.roundedBorder)
+                    .lineLimit(1...6)
+                    .disabled(isStreaming)
+                    .onSubmit { send() }
+
+                Button {
+                    send()
+                } label: {
+                    if isStreaming {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.system(size: 22))
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(inputText.isEmpty || isStreaming || apiKey == nil)
+            }
+            .padding(12)
+        }
+    }
+
+    // MARK: - Actions
+
+    private func send() {
+        let prompt = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty, let key = apiKey, !isStreaming else { return }
+        inputText = ""
+        staged = nil
+        errorBanner = nil
+        let userTurn = ChatTurn(role: .user, content: prompt)
+        messages.append(userTurn)
+        streamingText = ""
+        isStreaming = true
+
+        Task {
+            let api = ClaudeAPI(apiKey: key)
+            let history = messages.map { ClaudeMessage(role: $0.role.wireValue, content: $0.content) }
+            for await event in api.stream(history: history,
+                                          systemPrompt: ChatView.systemPrompt) {
+                switch event {
+                case .textDelta(let text):
+                    await MainActor.run { streamingText += text }
+                case .stop:
+                    await MainActor.run { finalizeAssistantTurn() }
+                case .error(let msg):
+                    await MainActor.run {
+                        errorBanner = msg
+                        isStreaming = false
+                        streamingText = ""
+                    }
+                }
+            }
+        }
+    }
+
+    private func finalizeAssistantTurn() {
+        let text = streamingText
+        streamingText = ""
+        isStreaming = false
+        guard !text.isEmpty else { return }
+        messages.append(ChatTurn(role: .assistant, content: text))
+        if let stagedLock = StagedLock.from(text: text) {
+            staged = stagedLock
+        }
+    }
+
+    private func approve(_ staged: StagedLock) {
+        do {
+            LockStore.ensureDirExists()
+            let target = LockStore.locksDir.appendingPathComponent(staged.filename)
+            // Don't clobber existing files silently
+            if FileManager.default.fileExists(atPath: target.path) {
+                let backup = LockStore.locksDir.appendingPathComponent(
+                    "\(staged.filename).bak.\(Int(Date().timeIntervalSince1970))")
+                try FileManager.default.moveItem(at: target, to: backup)
+            }
+            try staged.body.write(to: target, atomically: true, encoding: .utf8)
+            // chmod +x so it's runnable
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o755], ofItemAtPath: target.path)
+            // Refresh + jump to it
+            state.locks = LockStore.listLocks()
+            self.staged = nil
+            messages.append(ChatTurn(role: .system,
+                                     content: "Installed `\(staged.filename)`. You can find it in the sidebar."))
+            if state.locks.contains(where: { $0.filename == staged.filename }) {
+                let basename = (staged.filename as NSString).deletingPathExtension
+                state.route = .lock(basename)
+            }
+        } catch {
+            errorBanner = "Failed to install: \(error)"
+        }
+    }
+
+    // MARK: - System prompt
+
+    static let systemPrompt = """
+    You are a Sentinel lock author. The user describes what they want; you reply with one script that does it.
+
+    A "lock" is a single executable script (bash, python, or swift). The user reviews your file before it's installed.
+
+    The Sentinel daemon ships a `sentinel` CLI on PATH that scripts call for cross-lock features:
+
+      sentinel check "$NAME" || exit 0     heartbeat + global pause + per-lock stop check.
+                                            Put this at the top of every loop iteration.
+      sentinel log <source> <event> [json]  append a row to the audit log
+      sentinel status <name> <text>        update the sidebar display string for a lock
+      sentinel commit <kind> <target> <secs>  create a write-once commitment
+      sentinel committed <kind> <target>   exit 0 if a matching commitment is active
+      sentinel kv get|set|del <key> [val]  cross-lock blackboard
+      sentinel pause / sentinel resume     toggle the global pause flag
+      sentinel emergency-exit <reason>     release all commitments + pause + log
+      sentinel world                       latest window snapshot as JSON
+      sentinel running                     JSON list of running locks
+
+    Environment:
+      $SENTINEL_LOCK_NAME — pre-set to the lock's name (use this with `sentinel check`)
+
+    Native macOS commands you can use directly (no abstractions, no permission ceremony):
+      osascript -e '...'                   run AppleScript
+      open -a "TextEdit"                   launch / activate an app
+      pmset, networksetup, etc.            other macOS CLIs
+
+    FORMAT YOUR RESPONSE EXACTLY LIKE THIS:
+
+    lock: <filename.ext>
+    A 1-2 sentence explanation of what the script does.
+
+    ```bash
+    #!/usr/bin/env bash
+    # sentinel: name="Display name shown in the sidebar"
+    # sentinel: description="What this lock does"
+    # ...rest of script...
+    ```
+
+    The first line MUST be exactly `lock: <filename.ext>` with a sensible filename like
+    `youtube_or_textedit.sh` or `pomodoro.py`. The filename's extension chooses the
+    interpreter (.sh → bash, .py → python3, .swift → swift, .rb → ruby, .js → node).
+
+    Keep scripts short — 20-60 lines is normal. No abstractions, no helper modules.
+    Use real OS commands directly.
+    """
+}
+
+// MARK: - Models / subviews
+
+struct ChatTurn: Identifiable {
+    let id = UUID()
+    let role: Role
+    let content: String
+
+    enum Role {
+        case user, assistant, system
+        var wireValue: String {
+            switch self {
+            case .user: return "user"
+            case .assistant: return "assistant"
+            case .system: return "user"
+            }
+        }
+    }
+}
+
+private struct MessageBubble: View {
+    let turn: ChatTurn
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            if turn.role == .user { Spacer() }
+            VStack(alignment: turn.role == .user ? .trailing : .leading, spacing: 2) {
+                Text(label)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Text(turn.content)
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(background)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .foregroundStyle(turn.role == .user ? Color.white : Color.primary)
+                    .frame(maxWidth: 600, alignment: turn.role == .user ? .trailing : .leading)
+            }
+            if turn.role != .user { Spacer() }
+        }
+    }
+
+    private var label: String {
+        switch turn.role {
+        case .user: return "you"
+        case .assistant: return "claude"
+        case .system: return "sentinel"
+        }
+    }
+
+    private var background: Color {
+        switch turn.role {
+        case .user: return Color.accentColor
+        case .assistant: return Color(nsColor: .windowBackgroundColor)
+        case .system: return Color.green.opacity(0.15)
+        }
+    }
+}
+
+struct StagedLock: Equatable {
+    let filename: String
+    let body: String
+
+    /// Parse `lock: <filename>` + first fenced code block out of an
+    /// assistant turn. Returns nil if either is missing.
+    static func from(text: String) -> StagedLock? {
+        // 1. Find the filename header. Match the FIRST line that begins
+        // with "lock: ".
+        var filename: String? = nil
+        for raw in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.lowercased().hasPrefix("lock:") {
+                let after = line.dropFirst("lock:".count)
+                    .trimmingCharacters(in: .whitespaces)
+                if !after.isEmpty {
+                    // Sanitize: only allow [a-zA-Z0-9._-]
+                    let sanitized = after.unicodeScalars.map { scalar -> Character in
+                        let ok = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "._-"))
+                        return ok.contains(scalar) ? Character(scalar) : "_"
+                    }
+                    filename = String(sanitized)
+                    break
+                }
+            }
+        }
+        guard let filename = filename else { return nil }
+
+        // 2. Find the first fenced code block. The fence is ``` optionally
+        // followed by a language tag.
+        guard let codeStart = text.range(of: "```") else { return nil }
+        // Skip past the language tag (the rest of the opening fence line)
+        let afterFence = text[codeStart.upperBound...]
+        guard let newlineAfterFence = afterFence.firstIndex(of: "\n") else { return nil }
+        let bodyStart = afterFence.index(after: newlineAfterFence)
+        // Find closing fence
+        guard let codeEnd = text.range(of: "```", range: bodyStart..<text.endIndex) else { return nil }
+        let body = String(text[bodyStart..<codeEnd.lowerBound])
+        return StagedLock(filename: filename, body: body)
+    }
+}
+
+private struct ReviewPane: View {
+    let staged: StagedLock
+    let onApprove: () -> Void
+    let onReject: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Divider()
+            HStack {
+                Image(systemName: "doc.badge.plus")
+                Text("Review and install: ")
+                + Text(staged.filename).bold().font(.system(.body, design: .monospaced))
+                Spacer()
+                Button("Reject", role: .destructive, action: onReject)
+                Button("Approve and install", action: onApprove)
+                    .buttonStyle(.borderedProminent)
+            }
+            ScrollView {
+                Text(staged.body)
+                    .font(.system(.callout, design: .monospaced))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+                    .padding(10)
+            }
+            .frame(maxHeight: 240)
+            .background(Color(nsColor: .textBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .padding(12)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+}
+
+private struct APIKeyMissingBanner: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("No Anthropic API key found.")
+                .font(.callout).bold()
+            Text("Set ANTHROPIC_API_KEY in your environment or write your key (single line) to ~/.config/sentinel/api_key, then quit and relaunch Sentinel.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(Color.orange.opacity(0.15))
+    }
+}
+
+private struct ErrorBanner: View {
+    let text: String
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.red)
+            Text(text)
+                .font(.caption)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(10)
+        .background(Color.red.opacity(0.12))
+    }
+}

@@ -25,7 +25,7 @@ struct ContentView: View {
     private var content: some View {
         switch state.route {
         case .chat:
-            ChatPlaceholder()
+            ChatView()
         case .activity:
             ActivityPlaceholder()
         case .lock(let name):
@@ -46,22 +46,6 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
         }
         .padding(.bottom, 10)
-    }
-}
-
-private struct ChatPlaceholder: View {
-    var body: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "bubble.left.and.bubble.right.fill")
-                .font(.system(size: 48))
-                .foregroundStyle(.tint)
-            Text("Chat coming in phase 5")
-                .font(.title3)
-            Text("Phase 5 wires this up to the Claude Messages API.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
