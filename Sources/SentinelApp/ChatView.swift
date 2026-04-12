@@ -28,14 +28,13 @@ struct ChatView: View {
     @State private var isStreaming: Bool = false
     @State private var inputText: String = ""
     @State private var staged: StagedLock? = nil
-    @State private var apiKey: String? = ClaudeAPI.loadAPIKey()
+    @State private var auth: ClaudeAuth = ClaudeAuth.detect()
+    @State private var sessionID: String? = nil
     @State private var errorBanner: String? = nil
 
     var body: some View {
         VStack(spacing: 0) {
-            if apiKey == nil {
-                APIKeyMissingBanner()
-            }
+            authBanner
             if let err = errorBanner {
                 ErrorBanner(text: err) { errorBanner = nil }
             }
@@ -48,6 +47,36 @@ struct ChatView: View {
             inputBar
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @ViewBuilder
+    private var authBanner: some View {
+        switch auth {
+        case .none:
+            AuthSetupBanner(onLogin: { startLogin() },
+                            onRefresh: { auth = ClaudeAuth.detect() })
+        case .cli:
+            EmptyView()  // happy path; no banner
+        case .apiKey:
+            EmptyView()
+        }
+    }
+
+    private func startLogin() {
+        // Spawn Terminal.app with `claude /login`. The Claude CLI handles
+        // the OAuth dance via the user's browser. After completion, the
+        // user comes back to Sentinel and clicks Refresh on the banner.
+        let cmd = ClaudeAPI.loginCommand()
+        let escaped = cmd.replacingOccurrences(of: "\"", with: "\\\"")
+        let script = "tell application \"Terminal\" to do script \"\(escaped)\""
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        proc.arguments = ["-e", script]
+        do {
+            try proc.run()
+        } catch {
+            errorBanner = "couldn't open Terminal.app: \(error)"
+        }
     }
 
     // MARK: - Subviews
@@ -135,7 +164,7 @@ struct ChatView: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .disabled(inputText.isEmpty || isStreaming || apiKey == nil)
+                .disabled(inputText.isEmpty || isStreaming || !auth.isReady)
             }
             .padding(12)
         }
@@ -145,7 +174,7 @@ struct ChatView: View {
 
     private func send() {
         let prompt = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prompt.isEmpty, let key = apiKey, !isStreaming else { return }
+        guard !prompt.isEmpty, auth.isReady, !isStreaming else { return }
         inputText = ""
         staged = nil
         errorBanner = nil
@@ -154,11 +183,17 @@ struct ChatView: View {
         streamingText = ""
         isStreaming = true
 
+        let resume = sessionID
+        let snapshot = messages
+
         Task {
-            let api = ClaudeAPI(apiKey: key)
-            let history = messages.map { ClaudeMessage(role: $0.role.wireValue, content: $0.content) }
+            let api = ClaudeAPI(auth: auth)
+            let history = snapshot.map {
+                ClaudeMessage(role: $0.role.wireValue, content: $0.content)
+            }
             for await event in api.stream(history: history,
-                                          systemPrompt: ChatView.systemPrompt) {
+                                          systemPrompt: ChatView.systemPrompt,
+                                          resumeSession: resume) {
                 switch event {
                 case .textDelta(let text):
                     await MainActor.run { streamingText += text }
@@ -170,6 +205,8 @@ struct ChatView: View {
                         isStreaming = false
                         streamingText = ""
                     }
+                case .sessionStarted(let id):
+                    await MainActor.run { sessionID = id }
                 }
             }
         }
@@ -227,7 +264,7 @@ struct ChatView: View {
                                             Put this at the top of every loop iteration.
       sentinel log <source> <event> [json]  append a row to the audit log
       sentinel status <name> <text>        update the sidebar display string for a lock
-      sentinel commit <kind> <target> <secs>  create a write-once commitment
+      sentinel commit <kind> <target> <secs>  create a write-once commitment (passive flag)
       sentinel committed <kind> <target>   exit 0 if a matching commitment is active
       sentinel kv get|set|del <key> [val]  cross-lock blackboard
       sentinel pause / sentinel resume     toggle the global pause flag
@@ -242,6 +279,43 @@ struct ChatView: View {
       osascript -e '...'                   run AppleScript
       open -a "TextEdit"                   launch / activate an app
       pmset, networksetup, etc.            other macOS CLIs
+
+    ===== RESTART-SAFETY RULE — STRICT =====
+
+    The user's invariant: **a force-restart of the Mac must end ALL enforcement**.
+    Nothing the script writes may keep enforcing after the script process dies.
+    The script IS the enforcement loop — when the script exits (normally, via
+    SIGTERM, or via a force-restart killing the process), enforcement must stop.
+
+    FORBIDDEN — these survive after the script dies and break the rule:
+
+    - Writing to /etc/hosts (entries persist across restart and across script exit)
+    - Installing LaunchAgents (~/Library/LaunchAgents/, /Library/LaunchAgents/,
+      /Library/LaunchDaemons/) — these auto-relaunch the script at next login
+    - Modifying /etc/sudoers or /etc/sudoers.d/
+    - Adding crontab entries (`crontab -e`, `/etc/cron*`, `launchctl bootstrap`)
+    - Writing files anywhere outside ~/Library/Application Support/Sentinel/
+    - Calling `sudo` for anything except read-only checks
+    - `pmset`, `nvram`, `csrutil`, `tmutil`, `defaults write` on system domains
+    - Installing global software (`brew install`, `npm i -g`, `pip install --user`)
+
+    ALLOWED — these are tied to the script's lifetime:
+
+    - Polling foreground app via osascript / NSWorkspace and redirecting via
+      `open -a TextEdit` when the user strays
+    - Spawning your own NSWindow / fullscreen overlay (the window dies with the
+      process; force-restart kills both)
+    - Showing macOS notifications via `osascript -e 'display notification ...'`
+    - Reading `sentinel world` to see what's on the screen
+    - Calling `sentinel commit` — commitments are PASSIVE flags other scripts
+      check; they don't actively enforce anything by themselves
+    - Reading/writing files inside ~/Library/Application Support/Sentinel/ via
+      the sentinel CLI (kv, log, status)
+
+    The general principle: **when your script's process dies, nothing should
+    still be running on the user's behalf.** If your enforcement strategy
+    requires installing a system file, you're solving it wrong — use a poll
+    loop instead.
 
     FORMAT YOUR RESPONSE EXACTLY LIKE THIS:
 
@@ -398,18 +472,38 @@ private struct ReviewPane: View {
     }
 }
 
-private struct APIKeyMissingBanner: View {
+private struct AuthSetupBanner: View {
+    let onLogin: () -> Void
+    let onRefresh: () -> Void
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("No Anthropic API key found.")
-                .font(.callout).bold()
-            Text("Set ANTHROPIC_API_KEY in your environment or write your key (single line) to ~/.config/sentinel/api_key, then quit and relaunch Sentinel.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "person.crop.circle.badge.exclamationmark")
+                    .font(.title3)
+                    .foregroundStyle(.orange)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Not signed in to Claude")
+                        .font(.callout).bold()
+                    Text("Sentinel uses your existing Claude subscription via the Claude CLI. Click Log in to authenticate (a Terminal window will open), then click Refresh.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            HStack(spacing: 8) {
+                Button("Log in to Claude", action: onLogin)
+                    .buttonStyle(.borderedProminent)
+                Button("Refresh", action: onRefresh)
+                    .buttonStyle(.bordered)
+                Spacer()
+                Text("or set ANTHROPIC_API_KEY")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
-        .background(Color.orange.opacity(0.15))
+        .background(Color.orange.opacity(0.12))
     }
 }
 

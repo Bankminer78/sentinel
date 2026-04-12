@@ -40,6 +40,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         LockStore.seedExamplesIfEmpty()
         state.locks = LockStore.listLocks()
 
+        // Restart-safety invariant: nothing should be "actively running"
+        // immediately after a force-restart. Clear stale `running` rows
+        // (their processes are dead because the OS killed them) so the
+        // sidebar doesn't lie about what's enforcing right now. We do
+        // NOT clear `commitments` — those are the user's intentional
+        // Cold Turkey choices and survive across launches by design.
+        if let db = try? Database.shared() {
+            try? db.execute("DELETE FROM running")
+            try? db.execute(
+                "INSERT INTO log (ts, source, event, payload) VALUES (?, 'app', 'launch_cleared_running', NULL)",
+                Date().timeIntervalSince1970)
+        }
+
         // Start the world recorder. It's the daemon-style component that
         // appends a row to the world table every couple of seconds.
         do {
