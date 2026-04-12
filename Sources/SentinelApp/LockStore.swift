@@ -26,6 +26,47 @@ enum LockStore {
             at: locksDir, withIntermediateDirectories: true)
     }
 
+    /// Copy bundled examples into the user's locks directory if it's
+    /// empty. Idempotent — once the user has any locks installed, this
+    /// is a no-op so we don't keep restoring deleted examples.
+    static func seedExamplesIfEmpty() {
+        ensureDirExists()
+        let fm = FileManager.default
+        let existing = (try? fm.contentsOfDirectory(atPath: locksDir.path)) ?? []
+        let visible = existing.filter { !$0.hasPrefix(".") }
+        guard visible.isEmpty else { return }
+
+        guard let examplesDir = Bundle.main.url(
+            forResource: "examples", withExtension: nil) else {
+            // Running outside of the .app bundle (e.g. `swift run`).
+            // Try the project's examples/locks/ instead.
+            let cwdExamples = URL(fileURLWithPath: fm.currentDirectoryPath)
+                .appendingPathComponent("examples/locks", isDirectory: true)
+            if fm.fileExists(atPath: cwdExamples.path) {
+                copyExamples(from: cwdExamples)
+            }
+            return
+        }
+        copyExamples(from: examplesDir)
+    }
+
+    private static func copyExamples(from src: URL) {
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(
+            at: src, includingPropertiesForKeys: nil) else { return }
+        for entry in entries where !entry.lastPathComponent.hasPrefix(".") {
+            let dst = locksDir.appendingPathComponent(entry.lastPathComponent)
+            do {
+                try fm.copyItem(at: entry, to: dst)
+                // chmod +x
+                try fm.setAttributes(
+                    [.posixPermissions: 0o755], ofItemAtPath: dst.path)
+            } catch {
+                NSLog("[Sentinel] failed to seed example \(entry.lastPathComponent): \(error)")
+            }
+        }
+    }
+
     static func listLocks() -> [LockEntry] {
         ensureDirExists()
         let fm = FileManager.default

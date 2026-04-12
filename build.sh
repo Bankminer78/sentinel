@@ -31,6 +31,16 @@ cp ".build/$CONFIG/SentinelApp" "$MACOS_DIR/$APP_NAME"
 #   ln -s "$PWD/build/Sentinel.app/Contents/Resources/sentinel" /usr/local/bin/
 cp ".build/$CONFIG/sentinel" "$RES_DIR/sentinel"
 
+# Ship the example locks inside the bundle. AppDelegate copies them
+# into ~/Library/Application Support/Sentinel/locks/ on first launch
+# (only if that directory is empty), so a fresh user has something to
+# run + read as documentation.
+mkdir -p "$RES_DIR/examples"
+cp examples/locks/*.sh examples/locks/*.swift examples/locks/*.py 2>/dev/null \
+   "$RES_DIR/examples/" || true
+# Re-run with explicit globs in case some are missing
+[ -d examples/locks ] && cp -r examples/locks/. "$RES_DIR/examples/"
+
 cat > "$CONTENTS/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

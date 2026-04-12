@@ -33,9 +33,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
 
-        // Make sure the locks directory exists, and seed the lock list
-        // before the window opens so the sidebar isn't empty for a beat.
+        // Make sure the locks directory exists, seed bundled examples on
+        // first launch (idempotent), then load the list before the window
+        // opens so the sidebar isn't empty for a beat.
         LockStore.ensureDirExists()
+        LockStore.seedExamplesIfEmpty()
         state.locks = LockStore.listLocks()
 
         // Start the world recorder. It's the daemon-style component that
@@ -70,21 +72,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Rescan the locks directory and the `running` table. Called every
     /// 1.5s by the refresh timer so the sidebar shows fresh state without
     /// the user having to click anything.
+    ///
+    /// Also prunes stale running rows: any row whose last_heartbeat is
+    /// more than 30 seconds old is from a script that crashed, was
+    /// SIGKILLed, or exited cleanly without cleaning up. We delete those
+    /// so the sidebar doesn't keep showing dead locks indefinitely.
     private func refreshFromDisk() {
         let locks = LockStore.listLocks()
         var running: [String: RunningInfo] = [:]
-        if let db = try? Database.shared(),
-           let rows = try? db.query("SELECT * FROM running") {
-            for row in rows {
-                guard let name = row.string("name"),
-                      let pid = row.int("pid"),
-                      let started = row.double("started_at"),
-                      let beat = row.double("last_heartbeat") else { continue }
-                running[name] = RunningInfo(
-                    pid: pid,
-                    startedAt: started,
-                    lastHeartbeat: beat,
-                    statusText: row.string("status_text"))
+        if let db = try? Database.shared() {
+            let stale = Date().timeIntervalSince1970 - 30
+            try? db.execute("DELETE FROM running WHERE last_heartbeat < ?", stale)
+            if let rows = try? db.query("SELECT * FROM running") {
+                for row in rows {
+                    guard let name = row.string("name"),
+                          let pid = row.int("pid"),
+                          let started = row.double("started_at"),
+                          let beat = row.double("last_heartbeat") else { continue }
+                    running[name] = RunningInfo(
+                        pid: pid,
+                        startedAt: started,
+                        lastHeartbeat: beat,
+                        statusText: row.string("status_text"))
+                }
             }
         }
         DispatchQueue.main.async {
