@@ -9,12 +9,13 @@ struct LockDetailView: View {
     @EnvironmentObject var state: AppState
 
     @State private var sourceText: String = ""
-    @State private var selectedTab: DetailTab = .output
+    @State private var selectedTab: DetailTab = .dashboard
     @State private var showDeleteConfirm: Bool = false
 
     enum DetailTab: String, CaseIterable, Identifiable {
-        case output = "Output"
-        case source = "Source"
+        case dashboard = "Dashboard"
+        case output    = "Output"
+        case source    = "Source"
         var id: String { rawValue }
     }
 
@@ -118,8 +119,9 @@ struct LockDetailView: View {
             .padding(.top, 8)
 
             switch selectedTab {
-            case .output: outputView
-            case .source: sourceView
+            case .dashboard: DashboardView(lock: lock)
+            case .output:    outputView
+            case .source:    sourceView
             }
         }
     }

@@ -95,7 +95,8 @@ enum LockStore {
                 path: url,
                 displayName: header["name"] ?? basename.replacingOccurrences(of: "_", with: " "),
                 description: header["description"] ?? "",
-                language: language
+                language: language,
+                ui: LockUI.from(header: header)
             ))
         }
         return out
