@@ -31,7 +31,10 @@ struct LockDetailView: View {
         .onAppear { loadSource() }
         .onChange(of: lock.path) { _ in
             loadSource()
-            selectedTab = .output
+            // Every lock switch lands on Dashboard — that's the view
+            // humans care about. Output and Source are diagnostic tabs
+            // the user opens deliberately, not defaults.
+            selectedTab = .dashboard
         }
         .alert("Delete \(lock.displayName)?",
                isPresented: $showDeleteConfirm) {
