@@ -89,6 +89,13 @@ enum LockStore {
 
             let basename = url.deletingPathExtension().lastPathComponent
             let header = parseHeader(at: url)
+            // Convention: <name>.html next to <name>.sh becomes the
+            // Dashboard. Nothing in the script's header declares it —
+            // if the file is there, it's the dashboard.
+            let dashboardCandidate = url.deletingPathExtension()
+                .appendingPathExtension("html")
+            let dashboardURL: URL? = fm.fileExists(atPath: dashboardCandidate.path)
+                ? dashboardCandidate : nil
             out.append(LockEntry(
                 name: basename,
                 filename: url.lastPathComponent,
@@ -96,7 +103,7 @@ enum LockStore {
                 displayName: header["name"] ?? basename.replacingOccurrences(of: "_", with: " "),
                 description: header["description"] ?? "",
                 language: language,
-                ui: LockUI.from(header: header)
+                dashboardURL: dashboardURL
             ))
         }
         return out

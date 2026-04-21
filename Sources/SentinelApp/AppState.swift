@@ -28,39 +28,14 @@ struct LockEntry: Identifiable, Equatable {
     let displayName: String   // from "# sentinel: name=" header, falls back to filename
     let description: String   // from header
     let language: String      // sh / python / swift / unknown
-    let ui: LockUI            // what widget renders on the Dashboard tab
+
+    /// Optional dashboard. If a file named `<name>.html` exists next to
+    /// the lock script, it becomes the Dashboard tab's content. Claude
+    /// authors it alongside the script. No config needed — the sibling
+    /// file IS the config.
+    let dashboardURL: URL?
 
     var id: String { name }
-}
-
-/// A lock's optional Dashboard widget, declared in its header comments
-/// via `# sentinel: ui=<type>` plus widget-specific keys. Unknown or
-/// missing ui declarations fall back to `.status` — a generic card
-/// showing the lock's live status_text + recent log entries.
-enum LockUI: Equatable {
-    /// Generic — shows the running.status_text prominently + recent logs.
-    case status
-
-    /// Progress ring + time remaining / used. Keys:
-    ///   quota_key    — kv key holding the "used seconds" counter
-    ///   quota_limit  — daily quota in seconds
-    case quota(key: String, limitS: Int)
-
-    /// Parse from the flat header dict (e.g. {"ui": "quota",
-    /// "quota_key": "quota:distractions:used_s", "quota_limit": "1200"}).
-    static func from(header: [String: String]) -> LockUI {
-        switch header["ui"]?.lowercased() {
-        case "quota":
-            guard let k = header["quota_key"], !k.isEmpty,
-                  let s = header["quota_limit"],
-                  let limit = Int(s), limit > 0 else {
-                return .status
-            }
-            return .quota(key: k, limitS: limit)
-        default:
-            return .status
-        }
-    }
 }
 
 /// Live status of a running lock — joined from the `running` table.

@@ -234,16 +234,26 @@ struct ChatView: View {
                 try FileManager.default.moveItem(at: target, to: backup)
             }
             try staged.body.write(to: target, atomically: true, encoding: .utf8)
-            // chmod +x so it's runnable
-            try FileManager.default.setAttributes(
-                [.posixPermissions: 0o755], ofItemAtPath: target.path)
-            // Refresh + jump to it
+            // chmod +x only for files that are actual lock scripts — HTML
+            // dashboards and future asset files (CSS, JSON) don't need it.
+            let ext = (staged.filename as NSString).pathExtension.lowercased()
+            let scriptExts: Set<String> = ["sh", "bash", "py", "python",
+                                           "swift", "rb", "ruby", "js", "mjs"]
+            if scriptExts.contains(ext) {
+                try FileManager.default.setAttributes(
+                    [.posixPermissions: 0o755], ofItemAtPath: target.path)
+            }
+            // Refresh + jump to the corresponding lock. For a script:
+            // `foo.sh` → route to lock "foo". For a dashboard: `foo.html`
+            // → also route to lock "foo" (so the user sees the Dashboard
+            // tab render with the new HTML immediately).
             state.locks = LockStore.listLocks()
             self.staged = nil
+            let basename = (staged.filename as NSString).deletingPathExtension
+            let verb = ext == "html" ? "Installed dashboard" : "Installed"
             messages.append(ChatTurn(role: .system,
-                                     content: "Installed `\(staged.filename)`. You can find it in the sidebar."))
-            if state.locks.contains(where: { $0.filename == staged.filename }) {
-                let basename = (staged.filename as NSString).deletingPathExtension
+                                     content: "\(verb) `\(staged.filename)`."))
+            if state.locks.contains(where: { $0.name == basename }) {
                 state.route = .lock(basename)
             }
         } catch {
@@ -335,6 +345,67 @@ struct ChatView: View {
 
     Keep scripts short — 20-60 lines is normal. No abstractions, no helper modules.
     Use real OS commands directly.
+
+    ==================================================================
+    OPTIONAL DASHBOARD (second turn, when the user asks)
+    ==================================================================
+
+    Each lock can ship a SwiftUI-free, Claude-authored **Dashboard tab**:
+    a `<lockname>.html` file placed next to the script. If present, the
+    Sentinel app loads it in a WKWebView and uses it as the default tab
+    for that lock (in place of the generic status card).
+
+    Only author a dashboard when the user asks for one. Emit it the same
+    way as a script — `lock: <lockname>.html` followed by ONE fenced
+    HTML code block.
+
+    The page runs in a webview with an injected `window.sentinel` bridge.
+    All methods return Promises:
+
+      sentinel.kv.get(key)             → string value or null
+      sentinel.kv.set(key, val)        → true
+      sentinel.kv.del(key)             → true
+      sentinel.running(name?)          → {pid, startedAt, lastHeartbeat, statusText}
+                                          or null if not running. `name` defaults
+                                          to this dashboard's own lock.
+      sentinel.logs(name?, limit?)     → array of {id, ts, source, event, payload}
+                                          sorted newest first.
+      sentinel.run(name?)              → true. Spawns the lock.
+      sentinel.stop(name?)             → true. SIGTERMs the lock.
+      sentinel.commit(kind, target, secs) → true. Write-once commitment.
+      sentinel.committed(kind, target?) → bool.
+      sentinel.world()                 → {ts, windows:[{app,title,...}],
+                                          foregroundApp, foregroundWindow}
+
+    `window.sentinel.lockName` is a string with the lock's basename so
+    you don't have to hardcode it.
+
+    STYLING: use `-apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui`
+    fonts and `color-scheme: light dark` + media queries so the dashboard
+    matches the user's macOS appearance. Use `tabular-nums` for any
+    time/number displays. Keep backgrounds `transparent` so the app's
+    window chrome shows through.
+
+    DYNAMIC: poll with `setInterval(refresh, 1000)` and call whichever
+    sentinel.* methods you need. Don't over-render — only update DOM
+    elements when values change.
+
+    Example shape (trimmed):
+    ```html
+    <!doctype html>
+    <style>
+      body { font-family: -apple-system, sans-serif; background: transparent; }
+      .time { font-size: 48px; font-variant-numeric: tabular-nums; }
+    </style>
+    <div class="time" id="time">—</div>
+    <script>
+      async function tick() {
+        const used = parseInt(await sentinel.kv.get("quota:...:used_s")) || 0;
+        document.getElementById("time").textContent = used + "s";
+      }
+      tick(); setInterval(tick, 1000);
+    </script>
+    ```
     """
 }
 
